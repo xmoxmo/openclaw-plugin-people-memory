@@ -1,0 +1,142 @@
+{
+  "id": "people",
+  "name": "People Memory",
+  "description": "Workspace-scoped people and group memory backed by SQLite.",
+  "version": "0.0.1",
+  "skills": [
+    "skills/people-identifier"
+  ],
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "hook"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dataDir": {
+        "type": "string",
+        "default": "{stateDir}/plugins/people/{workspaceKey}",
+        "description": "Data directory template. Defaults to {stateDir}/plugins/people/{workspaceKey} (state dir per workspace, like plugins/<id>). Supports {stateDir}, {workspace}, {workspaceKey}, {agentDir}, {agentId}, {home}."
+      },
+      "workspaceDataDirs": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "description": "Per-workspace data directory overrides, keyed by absolute workspace path."
+      },
+      "databaseFile": {
+        "type": "string",
+        "default": "people.db"
+      },
+      "injectContext": {
+        "type": "boolean",
+        "default": true
+      },
+      "injectGroupMemory": {
+        "type": "boolean",
+        "default": true
+      },
+      "injectMaxChars": {
+        "type": "number",
+        "default": 1200
+      },
+      "disabledAgents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "capture": {
+        "type": "boolean",
+        "default": true
+      },
+      "captureGroups": {
+        "type": "boolean",
+        "default": true
+      },
+      "captureSkipSenders": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Sender ids (regex, case-insensitive) that never become people. Defaults to system/cron auto-rows like bncr-history-system."
+      },
+      "importLegacy": {
+        "type": "boolean",
+        "default": true
+      },
+      "platformTemplate": {
+        "type": "string",
+        "default": "{channel}/{account}",
+        "description": "Platform label template. {channel} and {account} are filled when available."
+      },
+      "platformOverrides": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "description": "Per-channel platform templates, for example {\"telegram\":\"telegram\"}."
+      },
+      "multiAccountChannels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "bncr"
+        ],
+        "description": "Multi-backend channel names (e.g. bncr): account keys require a backend segment such as bncr/tgBot. Bare channel writes are deferred or merged into a backend row; bare rows are flagged and cleaned by health/repair."
+      },
+      "debug": {
+        "type": "boolean",
+        "default": false
+      },
+      "senderFamilies": {
+        "type": "array",
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2
+        },
+        "default": [
+          [
+            "bncr/GewePlus",
+            "bncr/GolemPlus"
+          ]
+        ],
+        "description": "Platform label pairs whose sender ids share one space (GewePlus + GolemPlus are two accesses of the same WeChat platform). Same-sender rows in a family auto-bind to one person; there is no alias concept."
+      }
+    }
+  },
+  "contracts": {
+    "tools": [
+      "people_status",
+      "people_lookup",
+      "people_remember",
+      "people_name",
+      "people_note",
+      "people_bind",
+      "people_forget",
+      "people_validate",
+      "people_scan_mark",
+      "people_bootstrap",
+      "people_backup",
+      "people_health",
+      "people_cycle",
+      "people_search",
+      "people_dimension",
+      "people_merge",
+      "people_merge_account",
+      "people_unbind"
+    ]
+  }
+}

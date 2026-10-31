@@ -1,0 +1,69 @@
+{
+  "name": "openclaw-plugin-people-memory",
+  "version": "0.0.1",
+  "type": "module",
+  "private": false,
+  "description": "Workspace-scoped people and group memory for OpenClaw agents, backed by SQLite.",
+  "author": "xmoxmo",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xmoxmo/openclaw-plugin-people-memory.git"
+  },
+  "homepage": "https://github.com/xmoxmo/openclaw-plugin-people-memory#readme",
+  "bugs": {
+    "url": "https://github.com/xmoxmo/openclaw-plugin-people-memory/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "people",
+    "memory",
+    "identity",
+    "sqlite",
+    "bncr"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "DESIGN.md",
+    "LICENSE",
+    "assets/**",
+    "skills",
+    "automation/README.md",
+    "automation/cycle.template.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run build && npm test"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
+    },
+    "build": {
+      "openclawVersion": "2026.10.9",
+      "pluginSdkVersion": "2026.10.9"
+    }
+  }
+}
