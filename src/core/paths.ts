@@ -52,7 +52,13 @@ export function ensureDir(dir: string): void {
 export function encodeWorkspaceSegment(workspaceDir: string): string {
   const real = realpathOrResolve(workspaceDir);
   const trimmed = real.replace(/^[/\\]+/, "");
-  const slug = trimmed.replace(/[/\\]+/g, "__").replace(/[^A-Za-z0-9._-]/g, "_");
+  // Escape literal underscores before collapsing path separators to "__", so
+  // "/a/b" and "/a__b" map to different directories (workspace isolation).
+  // Paths without underscores keep their previous directory name.
+  const slug = trimmed
+    .replace(/_/g, "_5f")
+    .replace(/[/\\]+/g, "__")
+    .replace(/[^A-Za-z0-9._-]/g, "_");
   return slug || "workspace";
 }
 

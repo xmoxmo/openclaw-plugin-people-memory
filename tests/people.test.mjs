@@ -612,7 +612,7 @@ test("accounts that are group bots get marked as bot", () => {
   service.remember({ accountId: "bncr/GewePlus:bot1", content: "fire is a group bot" });
   service.capture({ platform: "bncr/GewePlus", senderId: "bot2", senderName: "samplebot", chatId: "g1" });
   service.db.upsertGroupMember({ groupId: "bncr:GewePlus:g1", accountId: "bncr/GewePlus:bot2", classification: "likely_bot" });
-  service.remember({ accountId: "bncr/GewePlus:bot2", content: "ovo fact" });
+  service.remember({ accountId: "bncr/GewePlus:bot2", content: "sample fact" });
 
   const before = service.health().issues;
   assert.ok(before.some((x) => x.code === "bot_profile_unmarked" && x.message.includes("bot1")));
@@ -623,4 +623,33 @@ test("accounts that are group bots get marked as bot", () => {
   const after = service.health().issues;
   assert.ok(!after.some((x) => x.code === "bot_profile_unmarked"));
   service.close();
+});
+
+
+test("workspace key does not collide on underscore vs path separator", () => {
+  assert.notEqual(encodeWorkspaceSegment("/a/b"), encodeWorkspaceSegment("/a__b"));
+  // Backward compatible: a plain path keeps its previous directory name.
+  assert.equal(encodeWorkspaceSegment("/root/.openclaw/workspace"), "root__.openclaw__workspace");
+});
+
+test("merging accounts preserves conflicting trait values instead of dropping them", () => {
+  const workspace = tempWorkspace();
+  const service = open(workspace);
+  service.capture({ platform: "telegram", senderId: "m1", senderName: "源" });
+  service.capture({ platform: "telegram", senderId: "m2", senderName: "目标" });
+  service.remember({ accountId: "telegram:m1", content: "住在杭州", dimension: "basic_origin" });
+  service.remember({ accountId: "telegram:m2", content: "住在青岛", dimension: "basic_origin" });
+
+  service.mergeAccounts("telegram:m1", "telegram:m2");
+
+  const traits = service.db.getTraits("account", "telegram:m2");
+  const origin = traits.find((trait) => trait.dimension === "basic_origin");
+  assert.equal(origin.value, "住在青岛", "target keeps its own trait value");
+  const impressions = service.db.listImpressions("account", "telegram:m2", 50);
+  assert.ok(
+    impressions.some(
+      (impression) => impression.content.includes("合并保留特征 basic_origin") && impression.content.includes("住在杭州"),
+    ),
+    "source conflict is preserved as an impression",
+  );
 });

@@ -156,7 +156,10 @@ export function registerTools(api, runtime) {
         // Internal turns (cron, isolated jobs) have no requester sender. They are
         // already trusted to run with the agent's own tool policy, so allow
         // arbitrary lookups instead of treating them as a non-owner stranger.
-        if (!isOwner && self) {
+        const isInternal = !ctx.requesterSenderId?.trim();
+        if (!isOwner && !isInternal) {
+            if (!self)
+                throw new Error("无法识别你的身份，暂时不能查询他人画像。");
             const selfMatches = targetRef === self.account_id ||
                 targetRef === self.sender_id ||
                 targetRef === self.display_name ||
@@ -238,7 +241,7 @@ export function registerTools(api, runtime) {
         const target = accountRef ? resolveAccountRef(service, accountRef) : self;
         if (!target)
             throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (self && target.account_id !== self.account_id && ctx.senderIsOwner !== true) {
+        if (target.account_id !== self?.account_id && !canManage(ctx)) {
             throw new Error("只能记录自己的信息。");
         }
         const modeRaw = stringArg(args, "mode");
@@ -268,7 +271,7 @@ export function registerTools(api, runtime) {
         const target = accountRef ? resolveAccountRef(service, accountRef) : self;
         if (!target)
             throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (self && target.account_id !== self.account_id && ctx.senderIsOwner !== true) {
+        if (target.account_id !== self?.account_id && !canManage(ctx)) {
             throw new Error("只能设置自己的称呼。");
         }
         if (stringArg(args, "person_name") && ctx.senderIsOwner !== true) {

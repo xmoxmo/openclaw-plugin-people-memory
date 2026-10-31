@@ -271,6 +271,21 @@ export class PeopleDatabase {
       );
       this.db.prepare("DELETE FROM impressions WHERE owner_type='account' AND owner_id=?").run(sourceId);
 
+      // Preserve conflicting source traits as impressions so a merge never
+      // silently drops a value the target already holds for the same dimension.
+      const sourceTraits = this.getTraits("account", sourceId);
+      const targetDims = new Set(this.getTraits("account", targetId).map((trait) => trait.dimension));
+      for (const trait of sourceTraits) {
+        if (targetDims.has(trait.dimension)) {
+          this.addImpression({
+            ownerType: "account",
+            ownerId: targetId,
+            content: `合并保留特征 ${trait.dimension}：${trait.value}`,
+            source: "merge",
+          });
+        }
+      }
+
       const traits = number(
         this.db
           .prepare(
@@ -449,6 +464,21 @@ export class PeopleDatabase {
       this.db
         .prepare("DELETE FROM impressions WHERE owner_type='person' AND owner_id=?")
         .run(sourcePersonId);
+
+      // Preserve conflicting source traits as impressions so a merge never
+      // silently drops a value the target already holds for the same dimension.
+      const sourceTraits = this.getTraits("person", sourcePersonId);
+      const targetDims = new Set(this.getTraits("person", targetPersonId).map((trait) => trait.dimension));
+      for (const trait of sourceTraits) {
+        if (targetDims.has(trait.dimension)) {
+          this.addImpression({
+            ownerType: "person",
+            ownerId: targetPersonId,
+            content: `合并保留特征 ${trait.dimension}：${trait.value}`,
+            source: "merge",
+          });
+        }
+      }
 
       const traits = number(
         this.db

@@ -323,7 +323,7 @@ export class PeopleService {
         if (direct)
             return direct;
         // Accept legacy and channel-prefixed forms such as
-        // "GewePlus:46192290892", "Bncr:GolemPlus:56154027594:0" or a bare chat id.
+        // "GewePlus:123456789", "Bncr:GolemPlus:987654321:0" or a bare chat id.
         const tokens = value.split(":").map((token) => token.trim()).filter(Boolean).reverse();
         for (const token of tokens) {
             if (!/^-?\d+$/.test(token))
@@ -915,8 +915,11 @@ export class PeopleService {
         const intervalHours = Math.max(1, Math.min(168, input.backupIntervalHours ?? 20));
         const backupAgeMs = before.lastBackupAt ? Date.now() - Date.parse(before.lastBackupAt) : Number.POSITIVE_INFINITY;
         const backupDue = input.forceBackup === true || !before.lastBackupAt || backupAgeMs >= intervalHours * 3_600_000;
-        const backup = backupDue ? this.backup(input.backupKeep ?? 14) : null;
-        // Run repair only after the fresh backup, so every automatic change has a rollback point.
+        // Take a fresh backup before repair whenever the periodic backup is due OR
+        // there are issues that repair might touch, so every automatic change has a
+        // rollback point.
+        const shouldBackup = backupDue || before.issues.length > 0;
+        const backup = shouldBackup ? this.backup(input.backupKeep ?? 14) : null;
         const repairActions = this.repair();
         const health = this.health();
         const actions = [];
@@ -986,7 +989,7 @@ export class PeopleService {
         return {
             cycledAt,
             backup,
-            backupSkipped: !backupDue,
+            backupSkipped: !shouldBackup,
             repairActions,
             health,
             actions,
