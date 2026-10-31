@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.3 — 发布链路验证（2026-11-01）
+
+- 验证 GitHub Actions OIDC 自动发布链路（tag → npm publish --provenance）；无功能变更。
+
 ## 0.0.2 — 修复版（2026-10-31）
 
 - 隐私修复：移除代码注释中残留的真实账号/群 ID 示例。
