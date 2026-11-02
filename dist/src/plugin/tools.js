@@ -1,6 +1,6 @@
 import { resolvePlatform } from "../core/platform.js";
 import { nowIso } from "../core/time.js";
-import { canManage, groupMatchesCurrent, isInternalAdmin, writeToolsEnabled } from "./authz.js";
+import { authorizeWorkspace, canManage, groupMatchesCurrent, isInternalAdmin, WRITE_TOOL_NAMES, writeToolsEnabled, } from "./authz.js";
 function stringArg(args, key) {
     const value = args[key];
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -113,19 +113,6 @@ function formatValidation(report) {
     return lines.join("\n");
 }
 export function registerTools(api, runtime) {
-    const WRITE_TOOLS = new Set([
-        "people_remember",
-        "people_name",
-        "people_note",
-        "people_bind",
-        "people_forget",
-        "people_bootstrap",
-        "people_backup",
-        "people_cycle",
-        "people_merge",
-        "people_unbind",
-        "people_scan_mark",
-    ]);
     const register = (name, description, parameters, handler) => {
         api.registerTool(((ctx) => ({
             name,
@@ -134,7 +121,7 @@ export function registerTools(api, runtime) {
             parameters: parameters,
             execute: async (_toolCallId, rawArgs) => {
                 const args = (rawArgs ?? {});
-                if (WRITE_TOOLS.has(name) && !writeToolsEnabled(runtime.config)) {
+                if (WRITE_TOOL_NAMES.has(name) && !writeToolsEnabled(runtime.config)) {
                     throw new Error("写入工具已关闭（writeTools=false）。需要记录时请先在插件配置中开启。");
                 }
                 return (await handler(args, ctx));
@@ -144,7 +131,8 @@ export function registerTools(api, runtime) {
     register("people_status", "查看当前工作区识人库的状态和计数。仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
         if (!canManage(ctx, runtime.config))
             throw new Error("查看识人库状态仅限 owner 或内部维护任务。");
-        const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+        const service = toolService(runtime, ctx, workspace);
         return textResult(formatStatus(service));
     });
     register("people_lookup", "查询当前对话对象、指定账号、指定人物或群的画像与记忆。默认查自己；查他人仅限 owner；群记忆默认只能查当前群。", {
@@ -426,7 +414,8 @@ export function registerTools(api, runtime) {
             workspace: { type: "string" },
         },
     }, (args, ctx) => {
-        const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+        const service = toolService(runtime, ctx, workspace);
         const fix = boolArg(args, "fix") === true;
         if (fix && !writeToolsEnabled(runtime.config))
             throw new Error("写入工具已关闭（writeTools=false），无法自动修复。");
@@ -473,10 +462,7 @@ export function registerTools(api, runtime) {
     register("people_bootstrap", "初始化当前工作区的识人库，并导入旧 JSON（如果存在）。可重复执行。仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
         if (!canManage(ctx, runtime.config))
             throw new Error("初始化识人库仅限 owner 或内部维护任务。");
-        const workspace = stringArg(args, "workspace");
-        if (workspace && workspace !== ctx.workspaceDir && ctx.senderIsOwner !== true) {
-            throw new Error("只有 owner 可以初始化其他工作区。");
-        }
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx, workspace);
         return textResult(`${formatStatus(service)}\n初始化完成。`);
     });
@@ -490,7 +476,7 @@ export function registerTools(api, runtime) {
     }, (args, ctx) => {
         if (!canManage(ctx, runtime.config))
             throw new Error("备份识人库仅限 owner 或内部维护任务。");
-        const workspace = stringArg(args, "workspace");
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx, workspace);
         const keepRaw = typeof args.keep === "number" ? args.keep : 14;
         const report = service.backup(keepRaw);
@@ -504,7 +490,8 @@ export function registerTools(api, runtime) {
     register("people_health", "检查当前工作区识人库的维护风险：校验错误、孤儿记录、重复人物、过密画像、缺备份等。只读，仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
         if (!canManage(ctx, runtime.config))
             throw new Error("健康检查仅限 owner 或内部维护任务。");
-        const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+        const service = toolService(runtime, ctx, workspace);
         const report = service.health();
         const lines = [
             `${report.ok ? "✅" : "❌"} 识人库健康检查`,
@@ -535,7 +522,7 @@ export function registerTools(api, runtime) {
     }, (args, ctx) => {
         if (!canManage(ctx, runtime.config))
             throw new Error("维护周期仅限 owner 或内部维护任务。");
-        const workspace = stringArg(args, "workspace");
+        const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx, workspace);
         const report = service.cycle({
             backupKeep: typeof args.backup_keep === "number" ? args.backup_keep : 14,

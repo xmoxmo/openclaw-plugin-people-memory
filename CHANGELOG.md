@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.5 — 隔离与写开关修复（2026-11-02）
+
+- 修复多个 `senderFamilies` 含同一 sender 时被拼接为一个身份的问题。每个 family 现在独立归并，跨 family 不会共享人物、特征或印象。
+- `people_merge_account` 纳入 `writeTools=false` 的写工具门禁，关闭写入后不能再通过账号归并修改数据。
+- 非 owner 的内部维护身份不能再用 `workspace` 参数打开其他工作区；带工作区参数的管理工具统一执行所有者校验。
+- Unicode 与反斜杠工作区路径增加摘要后缀，避免不同路径映射到同一个默认数据库目录；既有纯 ASCII 工作区目录名保持不变。
+- 新增跨 family、跨工作区、写工具清单和路径碰撞回归测试。
+
 ## 0.0.4 — 安全边界与严格模式（2026-11-02）
 
 - 新增严格模式 `internalAdminAgents`：默认不设置时保持原有行为（无发送者的内部任务视为维护身份）；设置后只允许名单内 agent 作为内部管理员。用于收紧 cron / heartbeat / subagent 与公开入口共用「无 requesterSenderId」带来的提权面。

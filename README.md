@@ -234,8 +234,10 @@ main 和 orion 共用一套库，由一个 home 周期任务处理 `agent:main` 
 ```
 
 - `internalAdminAgents`：一旦设置（哪怕是空数组），无发送者轮次只有名单内 agent 能执行维护类操作。**启用后要把运行周期任务的 agent 也列进来**，否则 `people_cycle` 会被拒绝。不设置则保持兼容默认。
-- `writeTools`：写类工具总开关，默认 `true`。`capture` 只控制入站自动采集，`injectContext` 只控制注入；两者都不等于禁止工具写入。
+- `writeTools`：写类工具总开关，默认 `true`；覆盖账号归并 `people_merge_account`。`capture` 只控制入站自动采集，`injectContext` 只控制注入；两者都不等于禁止工具写入。
 - 非 owner 只能查询或写入当前群的群记忆；跨群读写需要 owner 或内部维护身份。`people_forget` 的 `purge` 也仅限 owner 或内部维护身份。
+- 即使轮次被识别为内部维护身份，只有 owner 可以用 `workspace` 参数访问其他工作区；内部维护任务始终限制在启动它的工作区。
+- 多个 `senderFamilies` 会各自独立归并；同一 sender id 不会跨 family 共享人物、特征或印象。
 - `people_status` / `openclaw people status` 会显示当前安全模式；兼容模式下会提示可以启用严格模式。
 
 ### 明确不做的部分及原因
@@ -246,4 +248,4 @@ main 和 orion 共用一套库，由一个 home 周期任务处理 `agent:main` 
 - **不管理宿主机权限**：工具可见性和沙箱由 OpenClaw 与 agent 策略控制，不属于插件包范围。
 - **ClawHub readiness 的 `official` 项**：社区包不在官方频道，该项按设计就是 FAIL，不需要修。
 
-ClawHub 的自动安全评审目前给 `review / suspicious`，关注点是知情同意、共享访问控制和删除完整性。前两项属于产品与部署边界，第三项已通过 `purge` 提供显式路径；默认行为保持不变。
+ClawHub 的自动安全评审目前给 `review / suspicious`。0.0.4 报告中的跨 family 串人、账号归并绕过写开关、非 owner 跨工作区打开数据库和 Unicode 路径碰撞已由 0.0.5 修复。剩余关注点是知情同意、兼容模式下无发送者轮次的内部管理权限，以及普通遗忘仍保留备份；这些属于已知产品与部署边界，严格模式与 `purge` 已提供收紧路径，默认行为保持不变。

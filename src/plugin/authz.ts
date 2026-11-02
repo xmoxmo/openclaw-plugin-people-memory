@@ -1,4 +1,5 @@
 import type { PeoplePluginConfig } from "../core/types.js";
+import { realpathOrResolve } from "../core/paths.js";
 
 export type AuthzContext = {
   agentId?: string;
@@ -32,6 +33,39 @@ export function canManage(ctx: AuthzContext, config: PeoplePluginConfig): boolea
 /** Write tools default to on; operators can turn them off explicitly. */
 export function writeToolsEnabled(config: PeoplePluginConfig): boolean {
   return config.writeTools !== false;
+}
+
+/** Tools that mutate persistent data or maintenance content. */
+export const WRITE_TOOL_NAMES = new Set([
+  "people_remember",
+  "people_name",
+  "people_note",
+  "people_bind",
+  "people_forget",
+  "people_bootstrap",
+  "people_backup",
+  "people_cycle",
+  "people_merge",
+  "people_merge_account",
+  "people_unbind",
+  "people_scan_mark",
+]);
+
+/**
+ * Only owners may target another workspace. Internal maintenance identities
+ * remain scoped to the workspace that started the turn.
+ */
+export function authorizeWorkspace(
+  ctx: AuthzContext,
+  requested: string | undefined,
+  current: string | undefined,
+): string | undefined {
+  if (!requested || ctx.senderIsOwner === true) return requested;
+  if (!current?.trim()) throw new Error("无法确认当前工作区，不能指定其他工作区。");
+  if (realpathOrResolve(requested) !== realpathOrResolve(current)) {
+    throw new Error("只有 owner 可以访问其他工作区。");
+  }
+  return requested;
 }
 
 /** Whether a resolved group is the conversation the caller is currently in. */

@@ -123,7 +123,8 @@ export class PeopleService {
       displayNameChanged = accountResult.displayNameChanged;
       // Same-sender family rows (GewePlus + GolemPlus) collapse to one person.
       try {
-        this.syncFamilyBinding(senderId);
+        const familyKey = this.familyKeyOf(writePlatform);
+        if (familyKey) this.syncFamilyBinding(senderId, familyKey);
       } catch (error) {
         this.logger.warn(`[people] family binding failed for ${senderId}: ${(error as Error).message}`);
       }
@@ -770,20 +771,18 @@ export class PeopleService {
   }
 
   /** Rows of one sender that belong to the same same-sender family, e.g. GewePlus + GolemPlus. */
-  private familyRows(senderId: string): AccountRecord[] {
-    const rows = this.db.listAccountsBySender(senderId);
-    if (rows.length < 2) return [];
+  private familyGroups(senderId: string): Map<string, AccountRecord[]> {
     const byFamily = new Map<string, AccountRecord[]>();
-    for (const row of rows) {
+    for (const row of this.db.listAccountsBySender(senderId)) {
       const key = this.familyKeyOf(row.platform);
       if (!key) continue;
       byFamily.set(key, [...(byFamily.get(key) ?? []), row]);
     }
-    const result: AccountRecord[] = [];
-    for (const list of byFamily.values()) {
-      if (list.length >= 2) result.push(...list);
-    }
-    return result;
+    return byFamily;
+  }
+
+  private familyRows(senderId: string, familyKey: string): AccountRecord[] {
+    return this.familyGroups(senderId).get(familyKey) ?? [];
   }
 
   /**
@@ -791,8 +790,8 @@ export class PeopleService {
    * family (GewePlus + GolemPlus) are one human on two accesses: bind them to one person.
    * Conflicting manual bindings are left untouched and reported instead.
    */
-  private syncFamilyBinding(senderId: string): string | null {
-    const rows = this.familyRows(senderId);
+  private syncFamilyBinding(senderId: string, familyKey: string): string | null {
+    const rows = this.familyRows(senderId, familyKey);
     if (rows.length < 2) return null;
     if (rows.some((row) => row.current_role === "bot")) return null;
     const personIds = new Set(rows.map((row) => row.bound_person_id).filter((value): value is string => Boolean(value)));
@@ -861,13 +860,17 @@ export class PeopleService {
 
   /** Person binding conflicts created by manual owner bindings inside one family. */
   familyBindingConflicts(): Array<{ sender: string; rows: AccountRecord[]; persons: string[] }> {
-    const bySender = new Map<string, AccountRecord[]>();
+    const groups = new Map<string, { sender: string; rows: AccountRecord[] }>();
     for (const account of this.db.listAllAccounts()) {
-      if (!this.familyKeyOf(account.platform)) continue;
-      bySender.set(account.sender_id, [...(bySender.get(account.sender_id) ?? []), account]);
+      const familyKey = this.familyKeyOf(account.platform);
+      if (!familyKey) continue;
+      const key = `${familyKey}\0${account.sender_id}`;
+      const group = groups.get(key) ?? { sender: account.sender_id, rows: [] };
+      group.rows.push(account);
+      groups.set(key, group);
     }
     const conflicts: Array<{ sender: string; rows: AccountRecord[]; persons: string[] }> = [];
-    for (const [sender, rows] of bySender) {
+    for (const { sender, rows } of groups.values()) {
       if (rows.length < 2) continue;
       if (rows.some((row) => row.current_role === "bot")) continue;
       const persons = [...new Set(rows.map((row) => row.bound_person_id).filter((value): value is string => Boolean(value)))];
@@ -1391,16 +1394,22 @@ export class PeopleService {
         }
       }
       // Same-sender family rows collapse to one person (GewePlus + GolemPlus).
-      const familySenders = new Set<string>();
+      const familyScopes = new Map<string, Set<string>>();
       for (const account of this.db.listAllAccounts()) {
-        if (this.familyKeyOf(account.platform)) familySenders.add(account.sender_id);
+        const familyKey = this.familyKeyOf(account.platform);
+        if (!familyKey) continue;
+        const keys = familyScopes.get(account.sender_id) ?? new Set<string>();
+        keys.add(familyKey);
+        familyScopes.set(account.sender_id, keys);
       }
-      for (const sender of familySenders) {
-        try {
-          const action = this.syncFamilyBinding(sender);
-          if (action) actions.push(action);
-        } catch (error) {
-          this.logger.warn(`[people] family sweep failed for ${sender}: ${(error as Error).message}`);
+      for (const [sender, familyKeys] of familyScopes) {
+        for (const familyKey of familyKeys) {
+          try {
+            const action = this.syncFamilyBinding(sender, familyKey);
+            if (action) actions.push(action);
+          } catch (error) {
+            this.logger.warn(`[people] family sweep failed for ${sender} (${familyKey}): ${(error as Error).message}`);
+          }
         }
       }
       for (const account of this.findBotAccounts()) {

@@ -6,7 +6,14 @@ import { resolvePlatform } from "../core/platform.js";
 import { nowIso } from "../core/time.js";
 import type { PeopleService } from "../core/service.js";
 import type { AccountRecord } from "../core/types.js";
-import { canManage, groupMatchesCurrent, isInternalAdmin, writeToolsEnabled } from "./authz.js";
+import {
+  authorizeWorkspace,
+  canManage,
+  groupMatchesCurrent,
+  isInternalAdmin,
+  WRITE_TOOL_NAMES,
+  writeToolsEnabled,
+} from "./authz.js";
 import type { PeopleRuntime } from "./runtime.js";
 
 type ToolArgs = Record<string, unknown>;
@@ -157,19 +164,6 @@ function formatValidation(report: ReturnType<PeopleService["validate"]>): string
 }
 
 export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): void {
-  const WRITE_TOOLS = new Set([
-    "people_remember",
-    "people_name",
-    "people_note",
-    "people_bind",
-    "people_forget",
-    "people_bootstrap",
-    "people_backup",
-    "people_cycle",
-    "people_merge",
-    "people_unbind",
-    "people_scan_mark",
-  ]);
   const register = (
     name: string,
     description: string,
@@ -184,7 +178,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
         parameters: parameters as AnyAgentTool["parameters"],
         execute: async (_toolCallId: string, rawArgs: unknown) => {
           const args = (rawArgs ?? {}) as ToolArgs;
-          if (WRITE_TOOLS.has(name) && !writeToolsEnabled(runtime.config)) {
+          if (WRITE_TOOL_NAMES.has(name) && !writeToolsEnabled(runtime.config)) {
             throw new Error("写入工具已关闭（writeTools=false）。需要记录时请先在插件配置中开启。");
           }
           return (await handler(args, ctx)) as never;
@@ -200,7 +194,8 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
     { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } },
     (args, ctx) => {
       if (!canManage(ctx, runtime.config)) throw new Error("查看识人库状态仅限 owner 或内部维护任务。");
-      const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+      const service = toolService(runtime, ctx, workspace);
       return textResult(formatStatus(service));
     },
   );
@@ -520,7 +515,8 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
       },
     },
     (args, ctx) => {
-      const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+      const service = toolService(runtime, ctx, workspace);
       const fix = boolArg(args, "fix") === true;
       if (fix && !writeToolsEnabled(runtime.config)) throw new Error("写入工具已关闭（writeTools=false），无法自动修复。");
       if (fix && !canManage(ctx, runtime.config)) throw new Error("只有 owner 或本工作区的维护任务可以自动修复。");
@@ -573,10 +569,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
     { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } },
     (args, ctx) => {
       if (!canManage(ctx, runtime.config)) throw new Error("初始化识人库仅限 owner 或内部维护任务。");
-      const workspace = stringArg(args, "workspace");
-      if (workspace && workspace !== ctx.workspaceDir && ctx.senderIsOwner !== true) {
-        throw new Error("只有 owner 可以初始化其他工作区。");
-      }
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
       const service = toolService(runtime, ctx, workspace);
       return textResult(`${formatStatus(service)}\n初始化完成。`);
     },
@@ -595,7 +588,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
     },
     (args, ctx) => {
       if (!canManage(ctx, runtime.config)) throw new Error("备份识人库仅限 owner 或内部维护任务。");
-      const workspace = stringArg(args, "workspace");
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
       const service = toolService(runtime, ctx, workspace);
       const keepRaw = typeof args.keep === "number" ? args.keep : 14;
       const report = service.backup(keepRaw);
@@ -616,7 +609,8 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
     { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } },
     (args, ctx) => {
       if (!canManage(ctx, runtime.config)) throw new Error("健康检查仅限 owner 或内部维护任务。");
-      const service = toolService(runtime, ctx, stringArg(args, "workspace"));
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
+      const service = toolService(runtime, ctx, workspace);
       const report = service.health();
       const lines = [
         `${report.ok ? "✅" : "❌"} 识人库健康检查`,
@@ -650,7 +644,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
     },
     (args, ctx) => {
       if (!canManage(ctx, runtime.config)) throw new Error("维护周期仅限 owner 或内部维护任务。");
-      const workspace = stringArg(args, "workspace");
+      const workspace = authorizeWorkspace(ctx, stringArg(args, "workspace"), ctx.workspaceDir);
       const service = toolService(runtime, ctx, workspace);
       const report = service.cycle({
         backupKeep: typeof args.backup_keep === "number" ? args.backup_keep : 14,

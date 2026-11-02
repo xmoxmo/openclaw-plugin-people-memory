@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 const DEFAULT_STATE_DIR = path.join(os.homedir(), ".openclaw");
 export function expandTemplate(template, values) {
     const home = values.homeDir ?? os.homedir();
@@ -45,7 +46,13 @@ export function encodeWorkspaceSegment(workspaceDir) {
         .replace(/_/g, "_5f")
         .replace(/[/\\]+/g, "__")
         .replace(/[^A-Za-z0-9._-]/g, "_");
-    return slug || "workspace";
+    // Unsupported characters (including Unicode and backslashes) all collapse to
+    // "_". Add a digest only for those paths so existing ASCII workspace
+    // directory names remain stable while distinct paths cannot collide.
+    const digest = /[^A-Za-z0-9/_.-]/.test(trimmed)
+        ? `__h_${createHash("sha256").update(real).digest("hex").slice(0, 12)}`
+        : "";
+    return `${slug || "workspace"}${digest}`;
 }
 export function resolveStorePaths(params) {
     const config = params.config ?? {};

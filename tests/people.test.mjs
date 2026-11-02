@@ -7,7 +7,13 @@ import { PeopleService } from "../dist/src/core/service.js";
 import { encodeWorkspaceSegment, resolveStorePaths, resolveWorkspaceRoot } from "../dist/src/core/paths.js";
 import { resolvePlatform, platformLookupKey } from "../dist/src/core/platform.js";
 import { normalizeConfig } from "../dist/src/plugin/config.js";
-import { canManage, groupMatchesCurrent, isInternalAdmin } from "../dist/src/plugin/authz.js";
+import {
+  authorizeWorkspace,
+  canManage,
+  groupMatchesCurrent,
+  isInternalAdmin,
+  WRITE_TOOL_NAMES,
+} from "../dist/src/plugin/authz.js";
 
 function tempWorkspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "people-test-"));
@@ -18,9 +24,9 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 
-function open(workspace) {
+function open(workspace, config = {}) {
   const paths = resolveStorePaths({ workspaceDir: workspace, config: { dataDir: "{workspace}/people" } });
-  return new PeopleService({ paths, config: { importLegacy: true } });
+  return new PeopleService({ paths, config: { importLegacy: true, ...config } });
 }
 
 test("platform labels stay channel neutral", () => {
@@ -517,6 +523,32 @@ test("same-sender family rows auto-bind to one person", () => {
   service.close();
 });
 
+test("same sender ids stay isolated across separately configured sender families", () => {
+  const workspace = tempWorkspace();
+  const service = open(workspace, {
+    senderFamilies: [
+      ["family-a/one", "family-a/two"],
+      ["family-b/one", "family-b/two"],
+    ],
+  });
+
+  for (const platform of ["family-a/one", "family-a/two", "family-b/one", "family-b/two"]) {
+    service.capture({ platform, senderId: "shared-id", senderName: "同名" });
+  }
+  service.repair();
+
+  const a1 = service.db.getAccount("family-a/one:shared-id");
+  const a2 = service.db.getAccount("family-a/two:shared-id");
+  const b1 = service.db.getAccount("family-b/one:shared-id");
+  const b2 = service.db.getAccount("family-b/two:shared-id");
+  assert.ok(a1?.bound_person_id && a2?.bound_person_id && b1?.bound_person_id && b2?.bound_person_id);
+  assert.equal(a1.bound_person_id, a2.bound_person_id);
+  assert.equal(b1.bound_person_id, b2.bound_person_id);
+  assert.notEqual(a1.bound_person_id, b1.bound_person_id);
+  assert.equal(service.db.listAllPersons().length, 2);
+  service.close();
+});
+
 test("group rows stay independent per backend and ambiguity is reported", () => {
   const workspace = tempWorkspace();
   const service = open(workspace);
@@ -632,6 +664,8 @@ test("workspace key does not collide on underscore vs path separator", () => {
   assert.notEqual(encodeWorkspaceSegment("/a/b"), encodeWorkspaceSegment("/a__b"));
   // Backward compatible: a plain path keeps its previous directory name.
   assert.equal(encodeWorkspaceSegment("/root/.openclaw/workspace"), "root__.openclaw__workspace");
+  assert.notEqual(encodeWorkspaceSegment("/a/中"), encodeWorkspaceSegment("/a/文"));
+  assert.notEqual(encodeWorkspaceSegment("/a\\b"), encodeWorkspaceSegment("/a/b"));
 });
 
 test("merging accounts preserves conflicting trait values instead of dropping them", () => {
@@ -675,6 +709,13 @@ test("strict internal admin is opt-in and keeps the compatible default", () => {
   // An explicit empty list denies all internal admin without affecting owner.
   assert.equal(canManage({ agentId: "main" }, { internalAdminAgents: [] }), false);
   assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }, { internalAdminAgents: [] }), true);
+
+  // Internal maintenance identities cannot switch to another workspace.
+  const current = tempWorkspace();
+  const other = tempWorkspace();
+  assert.equal(authorizeWorkspace({ agentId: "main" }, current, current), current);
+  assert.throws(() => authorizeWorkspace({ agentId: "main" }, other, current), /只有 owner/);
+  assert.equal(authorizeWorkspace({ requesterSenderId: "u1", senderIsOwner: true }, other, current), other);
 });
 
 test("config keeps write tools on by default and accepts strict mode", () => {
@@ -687,6 +728,7 @@ test("config keeps write tools on by default and accepts strict mode", () => {
   assert.equal(strict.writeTools, false);
 
   assert.deepEqual(normalizeConfig({ internalAdminAgents: [] }).internalAdminAgents, []);
+  assert.equal(WRITE_TOOL_NAMES.has("people_merge_account"), true);
 });
 
 test("group access matches the current conversation across id forms", () => {
