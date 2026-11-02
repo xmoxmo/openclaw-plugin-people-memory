@@ -627,6 +627,11 @@ export class PeopleDatabase {
         const escaped = file.replace(/'/g, "''");
         this.db.exec(`VACUUM INTO '${escaped}'`);
     }
+    /** Erase deleted pages from the live database and truncate the WAL. */
+    purgeStorage() {
+        this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        this.db.exec("VACUUM;");
+    }
     dump() {
         const tables = [
             "accounts",

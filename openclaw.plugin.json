@@ -2,7 +2,7 @@
   "id": "people",
   "name": "People Memory",
   "description": "Workspace-scoped people and group memory backed by SQLite.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "skills": [
     "skills/people-identifier"
   ],
@@ -66,6 +66,18 @@
           "type": "string"
         },
         "description": "Sender ids (regex, case-insensitive) that never become people. Defaults to system/cron auto-rows like bncr-history-system."
+      },
+      "internalAdminAgents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Strict-mode allowlist for internal (no requester sender) admin turns such as cron, heartbeat and subagent. Omit to keep the compatible default; set to an array (even empty) to restrict internal admin to these agent ids. Cron cycle agents must be listed when strict mode is on."
+      },
+      "writeTools": {
+        "type": "boolean",
+        "default": true,
+        "description": "Master switch for tools that write (remember, name, note, bind, forget, merge, unbind, cycle, backup, scan mark). Default true. `capture` only controls automatic hook capture, not tool writes."
       },
       "importLegacy": {
         "type": "boolean",

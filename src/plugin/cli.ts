@@ -82,6 +82,11 @@ export function registerCli(api: OpenClawPluginApi, runtime: PeopleRuntime): voi
           console.log(describeCounts(status.counts));
           console.log(`最近全量扫描: ${status.lastFullScanAt ?? "无"}`);
           console.log(`旧 JSON 导入: ${status.legacyImportedAt ?? "无"}`);
+          console.log(
+            status.security.strictInternalAdmin
+              ? `安全模式: 严格 (内部管理员: ${status.security.internalAdminAgents?.join(", ") || "无"}; 写入工具: ${status.security.writeTools ? "开" : "关"})`
+              : "安全模式: 兼容 (默认行为; 可设置 internalAdminAgents 收紧内部提权)",
+          );
         });
 
       people

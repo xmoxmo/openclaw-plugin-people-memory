@@ -35,6 +35,7 @@ automations(action="add", job: {
 - **周期任务不设 `deleteAfterRun`**，否则跑一次就删。
 - `delivery.mode = "none"`：维护任务只做内部整理，不向群播报。
 - 一个工作区注册一个任务；同 workspaceDir 的多个 agent 由同一个任务覆盖（`{{AGENT_IDS}}` 里列全）。
+- 如果开启了严格模式 `internalAdminAgents`，运行周期任务的 agent 必须写进这个名单，否则 `people_cycle` 会以「仅 owner 或内部维护任务」拒绝。未设置该配置时保持兼容默认，无需额外操作。
 - 触发频率建议 6 小时一次；真正的备份/修复节奏由 `people_cycle` 内部决定，调频率只影响叫醒频率。
 
 ## 怎么确认在正常跑

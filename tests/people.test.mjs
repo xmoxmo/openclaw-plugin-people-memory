@@ -6,6 +6,8 @@ import test from "node:test";
 import { PeopleService } from "../dist/src/core/service.js";
 import { encodeWorkspaceSegment, resolveStorePaths, resolveWorkspaceRoot } from "../dist/src/core/paths.js";
 import { resolvePlatform, platformLookupKey } from "../dist/src/core/platform.js";
+import { normalizeConfig } from "../dist/src/plugin/config.js";
+import { canManage, groupMatchesCurrent, isInternalAdmin } from "../dist/src/plugin/authz.js";
 
 function tempWorkspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "people-test-"));
@@ -652,4 +654,80 @@ test("merging accounts preserves conflicting trait values instead of dropping th
     ),
     "source conflict is preserved as an impression",
   );
+});
+
+test("strict internal admin is opt-in and keeps the compatible default", () => {
+  // Default: an internal turn (no requester sender) keeps historical admin access.
+  assert.equal(canManage({ agentId: "main" }, {}), true);
+  assert.equal(isInternalAdmin({ agentId: "main" }, {}), true);
+
+  // A normal non-owner sender never manages other profiles.
+  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: false }, {}), false);
+  // Owner always manages.
+  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }, {}), true);
+
+  // Strict mode: only listed agents act as internal admins.
+  const strict = { internalAdminAgents: ["main"] };
+  assert.equal(canManage({ agentId: "main" }, strict), true);
+  assert.equal(canManage({ agentId: "public" }, strict), false);
+  // A public gateway run has no sender and no known agent id.
+  assert.equal(canManage({}, strict), false);
+  // An explicit empty list denies all internal admin without affecting owner.
+  assert.equal(canManage({ agentId: "main" }, { internalAdminAgents: [] }), false);
+  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }, { internalAdminAgents: [] }), true);
+});
+
+test("config keeps write tools on by default and accepts strict mode", () => {
+  const defaults = normalizeConfig({});
+  assert.equal(defaults.writeTools, true);
+  assert.equal(defaults.internalAdminAgents, undefined);
+
+  const strict = normalizeConfig({ internalAdminAgents: ["main", " home "], writeTools: false });
+  assert.deepEqual(strict.internalAdminAgents, ["main", "home"]);
+  assert.equal(strict.writeTools, false);
+
+  assert.deepEqual(normalizeConfig({ internalAdminAgents: [] }).internalAdminAgents, []);
+});
+
+test("group access matches the current conversation across id forms", () => {
+  const group = { group_id: "bncr/tgBot:123", chat_id: "123" };
+  assert.equal(groupMatchesCurrent(group, "123"), true);
+  assert.equal(groupMatchesCurrent(group, "bncr/tgBot:123"), true);
+  assert.equal(groupMatchesCurrent(group, "456"), false);
+  assert.equal(groupMatchesCurrent(group, undefined), false);
+});
+
+test("forget purge removes backups and legacy archives only when requested", () => {
+  const workspace = tempWorkspace();
+  const root = path.join(workspace, "people");
+  const service = open(workspace);
+  service.capture({ platform: "telegram", senderId: "p1", senderName: "Purge" });
+  service.remember({ accountId: "telegram:p1", content: "秘密甲" });
+  service.remember({ accountId: "telegram:p1", content: "秘密乙" });
+
+  // Legacy archive that still carries personal details.
+  writeJson(path.join(root, "accounts.json"), { _schema_version: 1, accounts: [] });
+  writeJson(path.join(root, "trait-dimensions.json"), { dimensions: [] });
+  fs.mkdirSync(path.join(root, "accounts"), { recursive: true });
+  fs.writeFileSync(path.join(root, "accounts", "legacy.json"), "{}");
+
+  service.backup();
+  assert.ok(fs.existsSync(path.join(root, "backups")), "backup exists before purge");
+
+  // Default forget leaves backups and legacy archive alone.
+  service.forget({ accountId: "telegram:p1", match: "秘密甲" });
+  assert.ok(fs.existsSync(path.join(root, "backups")), "default forget keeps backups");
+  assert.ok(fs.existsSync(path.join(root, "accounts.json")), "default forget keeps legacy archive");
+
+  const result = service.forget({ accountId: "telegram:p1", match: "秘密乙", purge: true });
+  assert.equal(result.impressions, 1);
+  assert.ok(result.purged && result.purged.files >= 1);
+  assert.equal(service.db.listImpressions("account", "telegram:p1", 50).length, 0);
+  assert.equal(fs.existsSync(path.join(root, "backups")), false, "purge removes backups");
+  assert.equal(fs.existsSync(path.join(root, "accounts.json")), false, "purge removes legacy index");
+  assert.equal(fs.existsSync(path.join(root, "trait-dimensions.json")), false, "purge removes legacy dimensions");
+  assert.equal(fs.existsSync(path.join(root, "accounts")), false, "purge removes legacy accounts dir");
+  service.close();
+  const wal = path.join(root, "people.db-wal");
+  assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, "purge truncates the WAL");
 });

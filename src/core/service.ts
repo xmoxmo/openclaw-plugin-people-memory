@@ -580,12 +580,13 @@ export class PeopleService {
     personId?: string;
     match: string;
     scope?: "all" | "impressions" | "traits";
-  }): { impressions: number; traits: number } {
+    purge?: boolean;
+  }): { impressions: number; traits: number; purged?: { files: number; dirs: number } } {
     const snapshot = this.profileTarget(input);
     const match = input.match.trim();
     if (!match) throw new Error("match 不能为空");
     const scope = input.scope ?? "all";
-    return {
+    const result: { impressions: number; traits: number; purged?: { files: number; dirs: number } } = {
       impressions:
         scope === "traits" ? 0 : this.db.removeImpressions(snapshot.ownerType, snapshot.ownerId, match),
       traits:
@@ -593,6 +594,52 @@ export class PeopleService {
           ? 0
           : this.db.removeTraitsMatching(snapshot.ownerType, snapshot.ownerId, match),
     };
+    if (input.purge === true) {
+      this.db.purgeStorage();
+      result.purged = this.purgeArchives();
+    }
+    return result;
+  }
+
+  /**
+   * Explicit erase path: drop the backup snapshots and the legacy JSON archive
+   * that may still contain deleted personal details. Irreversible; callers must
+   * opt in with `purge: true`.
+   */
+  private purgeArchives(): { files: number; dirs: number } {
+    const dataDir = this.paths.dataDir;
+    let files = 0;
+    let dirs = 0;
+    const removeDir = (dir: string): void => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          removeDir(full);
+        } else {
+          fs.rmSync(full, { force: true });
+          files += 1;
+        }
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+      dirs += 1;
+    };
+    removeDir(path.join(dataDir, "backups"));
+    for (const name of [
+      "accounts.json",
+      "persons.json",
+      "person_accounts.json",
+      "groups.json",
+      "scan-state.json",
+      "trait-dimensions.json",
+    ]) {
+      const file = path.join(dataDir, name);
+      if (!fs.existsSync(file)) continue;
+      fs.rmSync(file, { force: true });
+      files += 1;
+    }
+    for (const name of ["accounts", "persons", "groups"]) removeDir(path.join(dataDir, name));
+    return { files, dirs };
   }
 
   mergePersons(
@@ -1123,6 +1170,11 @@ export class PeopleService {
       dimensions: this.db.listDimensions(),
       lastFullScanAt: this.db.getScanMeta().lastFullScanAt,
       legacyImportedAt: this.db.metaGet("legacy_imported_at"),
+      security: {
+        strictInternalAdmin: this.config.internalAdminAgents !== undefined,
+        internalAdminAgents: this.config.internalAdminAgents ?? null,
+        writeTools: this.config.writeTools !== false,
+      },
     };
   }
 

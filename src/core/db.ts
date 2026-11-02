@@ -824,6 +824,12 @@ export class PeopleDatabase {
     this.db.exec(`VACUUM INTO '${escaped}'`);
   }
 
+  /** Erase deleted pages from the live database and truncate the WAL. */
+  purgeStorage(): void {
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    this.db.exec("VACUUM;");
+  }
+
   dump(): Record<string, unknown> {
     const tables = [
       "accounts",

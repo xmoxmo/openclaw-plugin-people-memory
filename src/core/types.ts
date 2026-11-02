@@ -9,6 +9,8 @@ export type PeoplePluginConfig = {
   capture?: boolean;
   captureGroups?: boolean;
   captureSkipSenders?: string[];
+  internalAdminAgents?: string[];
+  writeTools?: boolean;
   importLegacy?: boolean;
   platformTemplate?: string;
   multiAccountChannels?: string[];
@@ -159,6 +161,11 @@ export type StatusReport = {
   dimensions: Dimension[];
   lastFullScanAt: string | null;
   legacyImportedAt: string | null;
+  security: {
+    strictInternalAdmin: boolean;
+    internalAdminAgents: string[] | null;
+    writeTools: boolean;
+  };
 };
 
 export type BackupReport = {

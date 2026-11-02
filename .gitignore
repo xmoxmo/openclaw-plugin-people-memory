@@ -1,5 +1,7 @@
 dist/
 node_modules/
+reports/
+*.tgz
 *.db
 *.db-wal
 *.db-shm

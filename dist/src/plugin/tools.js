@@ -1,5 +1,6 @@
 import { resolvePlatform } from "../core/platform.js";
 import { nowIso } from "../core/time.js";
+import { canManage, groupMatchesCurrent, isInternalAdmin, writeToolsEnabled } from "./authz.js";
 function stringArg(args, key) {
     const value = args[key];
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -22,6 +23,12 @@ function rememberResult(label, result) {
     if (result.impressionStored)
         return `已记录到 ${label}。`;
     return "这条内容已存在，未重复写入。";
+}
+function forgetResultText(result) {
+    const base = `已删除印象 ${result.impressions} 条、特征 ${result.traits} 个。`;
+    if (!result.purged)
+        return base;
+    return `${base}已清理备份/旧归档：文件 ${result.purged.files} 个、目录 ${result.purged.dirs} 个。`;
 }
 function toolService(runtime, ctx, workspace) {
     return runtime.get({
@@ -50,9 +57,6 @@ function requireAccount(ctx, runtime, service) {
     if (!account)
         throw new Error("当前消息没有可识别的发送者，无法确定画像对象。");
     return account;
-}
-function canManage(ctx) {
-    return ctx.senderIsOwner === true || !ctx.requesterSenderId?.trim();
 }
 function resolveAccountRef(service, ref) {
     const matches = service.searchAccounts(ref);
@@ -85,6 +89,9 @@ function formatStatus(service) {
         `活跃维度：${status.dimensions.filter((dimension) => dimension.active).map((dimension) => dimension.key).join(", ")}`,
         `最近全量扫描：${status.lastFullScanAt ?? "无记录"}`,
         `旧 JSON 导入：${status.legacyImportedAt ?? "无"}`,
+        status.security.strictInternalAdmin
+            ? `安全模式：严格（内部管理员：${status.security.internalAdminAgents?.join(", ") || "无"}；写入工具：${status.security.writeTools ? "开" : "关"}）`
+            : "安全模式：兼容（默认行为；可设置 internalAdminAgents 收紧内部提权）",
     ].join("\n");
 }
 function formatValidation(report) {
@@ -106,6 +113,19 @@ function formatValidation(report) {
     return lines.join("\n");
 }
 export function registerTools(api, runtime) {
+    const WRITE_TOOLS = new Set([
+        "people_remember",
+        "people_name",
+        "people_note",
+        "people_bind",
+        "people_forget",
+        "people_bootstrap",
+        "people_backup",
+        "people_cycle",
+        "people_merge",
+        "people_unbind",
+        "people_scan_mark",
+    ]);
     const register = (name, description, parameters, handler) => {
         api.registerTool(((ctx) => ({
             name,
@@ -114,15 +134,20 @@ export function registerTools(api, runtime) {
             parameters: parameters,
             execute: async (_toolCallId, rawArgs) => {
                 const args = (rawArgs ?? {});
+                if (WRITE_TOOLS.has(name) && !writeToolsEnabled(runtime.config)) {
+                    throw new Error("写入工具已关闭（writeTools=false）。需要记录时请先在插件配置中开启。");
+                }
                 return (await handler(args, ctx));
             },
         })), { name });
     };
-    register("people_status", "查看当前工作区识人库的状态和计数。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_status", "查看当前工作区识人库的状态和计数。仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+        if (!canManage(ctx, runtime.config))
+            throw new Error("查看识人库状态仅限 owner 或内部维护任务。");
         const service = toolService(runtime, ctx, stringArg(args, "workspace"));
         return textResult(formatStatus(service));
     });
-    register("people_lookup", "查询当前对话对象、指定账号、指定人物或群的画像与记忆。默认查自己；查他人仅限 owner。", {
+    register("people_lookup", "查询当前对话对象、指定账号、指定人物或群的画像与记忆。默认查自己；查他人仅限 owner；群记忆默认只能查当前群。", {
         type: "object",
         additionalProperties: false,
         properties: {
@@ -140,6 +165,9 @@ export function registerTools(api, runtime) {
             const group = service.resolveGroup(groupRef);
             if (!group)
                 throw new Error(`没有找到群：${groupRef}。可以只传数字群号。`);
+            if (!canManage(ctx, runtime.config) && !groupMatchesCurrent(group, ctx.nativeChannelId)) {
+                throw new Error("只能查询当前群的群记忆。");
+            }
             return textResult(service.formatGroup(group));
         }
         const self = currentAccount(ctx, runtime, service);
@@ -153,10 +181,10 @@ export function registerTools(api, runtime) {
             return textResult(service.formatLookup(self, full));
         }
         const isOwner = ctx.senderIsOwner === true;
-        // Internal turns (cron, isolated jobs) have no requester sender. They are
-        // already trusted to run with the agent's own tool policy, so allow
-        // arbitrary lookups instead of treating them as a non-owner stranger.
-        const isInternal = !ctx.requesterSenderId?.trim();
+        // Internal turns (cron, isolated jobs) have no requester sender. They keep
+        // the compatible privileged default; strict mode narrows this to agents
+        // listed in `internalAdminAgents`.
+        const isInternal = isInternalAdmin(ctx, runtime.config);
         if (!isOwner && !isInternal) {
             if (!self)
                 throw new Error("无法识别你的身份，暂时不能查询他人画像。");
@@ -220,7 +248,7 @@ export function registerTools(api, runtime) {
             throw new Error("content 不能为空。");
         const personId = stringArg(args, "person");
         if (personId) {
-            if (!canManage(ctx))
+            if (!canManage(ctx, runtime.config))
                 throw new Error("只有 owner 或内部维护任务可以整理人物级画像。");
             const person = service.db.getPerson(personId);
             if (!person)
@@ -241,7 +269,7 @@ export function registerTools(api, runtime) {
         const target = accountRef ? resolveAccountRef(service, accountRef) : self;
         if (!target)
             throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (target.account_id !== self?.account_id && !canManage(ctx)) {
+        if (target.account_id !== self?.account_id && !canManage(ctx, runtime.config)) {
             throw new Error("只能记录自己的信息。");
         }
         const modeRaw = stringArg(args, "mode");
@@ -271,7 +299,7 @@ export function registerTools(api, runtime) {
         const target = accountRef ? resolveAccountRef(service, accountRef) : self;
         if (!target)
             throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (target.account_id !== self?.account_id && !canManage(ctx)) {
+        if (target.account_id !== self?.account_id && !canManage(ctx, runtime.config)) {
             throw new Error("只能设置自己的称呼。");
         }
         if (stringArg(args, "person_name") && ctx.senderIsOwner !== true) {
@@ -285,7 +313,7 @@ export function registerTools(api, runtime) {
         });
         return textResult(`已更新${result.target === "person" ? "人物" : "账号"}称呼${result.callName ? `：${result.callName}` : "。"}`);
     });
-    register("people_note", "向当前群或指定群追加一条群记忆。", {
+    register("people_note", "向当前群或指定群追加一条群记忆。非 owner 只能写当前群。", {
         type: "object",
         additionalProperties: false,
         required: ["summary"],
@@ -300,10 +328,14 @@ export function registerTools(api, runtime) {
         const summary = stringArg(args, "summary");
         if (!summary)
             throw new Error("summary 不能为空。");
-        const groupRef = stringArg(args, "group") ?? ctx.nativeChannelId ?? "";
+        const explicitGroup = stringArg(args, "group");
+        const groupRef = explicitGroup ?? ctx.nativeChannelId ?? "";
         if (!groupRef)
             throw new Error("当前会话没有群标识，请显式传 group。");
         const group = service.resolveGroupStrict(groupRef);
+        if (explicitGroup && !canManage(ctx, runtime.config) && !groupMatchesCurrent(group, ctx.nativeChannelId)) {
+            throw new Error("只能向当前群写入群记忆。");
+        }
         const result = service.note({
             groupId: group.group_id,
             summary,
@@ -336,7 +368,7 @@ export function registerTools(api, runtime) {
         });
         return textResult(`已绑定 ${account.account_id} → ${result.personId}${result.createdPerson ? "（新建人物）" : ""}；迁移印象 ${result.moved.impressions} 条、特征 ${result.moved.traits} 个。`);
     });
-    register("people_forget", "删除匹配到的印象或特征。默认只能操作自己；owner 可指定账号。", {
+    register("people_forget", "删除匹配到的印象或特征。默认只能操作自己；owner 可指定账号；purge 仅 owner 或内部维护任务可用。", {
         type: "object",
         additionalProperties: false,
         required: ["match"],
@@ -349,6 +381,10 @@ export function registerTools(api, runtime) {
                 enum: ["all", "impressions", "traits"],
                 description: "删除范围，默认 all。画像归并后用 impressions，避免误删 traits。",
             },
+            purge: {
+                type: "boolean",
+                description: "彻底清除：同时删除备份和旧 JSON 归档中的历史数据。不可恢复，默认关闭。",
+            },
         },
     }, (args, ctx) => {
         const service = toolService(runtime, ctx);
@@ -357,26 +393,30 @@ export function registerTools(api, runtime) {
             throw new Error("match 不能为空。");
         const scopeRaw = stringArg(args, "scope");
         const scope = scopeRaw === "impressions" || scopeRaw === "traits" ? scopeRaw : "all";
+        const purge = boolArg(args, "purge") === true;
+        if (purge && !canManage(ctx, runtime.config)) {
+            throw new Error("彻底清除（purge）仅限 owner 或内部维护任务。");
+        }
         const personId = stringArg(args, "person");
         if (personId) {
-            if (!canManage(ctx))
+            if (!canManage(ctx, runtime.config))
                 throw new Error("只有 owner 或内部维护任务可以整理人物级画像。");
             const person = service.db.getPerson(personId);
             if (!person)
                 throw new Error(`没有找到人物：${personId}`);
-            const result = service.forget({ personId: person.person_id, match, scope });
-            return textResult(`已删除印象 ${result.impressions} 条、特征 ${result.traits} 个。`);
+            const result = service.forget({ personId: person.person_id, match, scope, purge });
+            return textResult(forgetResultText(result));
         }
         const self = currentAccount(ctx, runtime, service);
         const accountRef = stringArg(args, "account");
         const target = accountRef ? resolveAccountRef(service, accountRef) : self;
         if (!target)
             throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (!canManage(ctx) && target.account_id !== self?.account_id) {
+        if (!canManage(ctx, runtime.config) && target.account_id !== self?.account_id) {
             throw new Error("只能删除自己的信息。");
         }
-        const result = service.forget({ accountId: target.account_id, match, scope });
-        return textResult(`已删除印象 ${result.impressions} 条、特征 ${result.traits} 个。`);
+        const result = service.forget({ accountId: target.account_id, match, scope, purge });
+        return textResult(forgetResultText(result));
     });
     register("people_validate", "校验当前工作区识人库的一致性。owner 可选择自动修复可修复项。", {
         type: "object",
@@ -388,14 +428,16 @@ export function registerTools(api, runtime) {
     }, (args, ctx) => {
         const service = toolService(runtime, ctx, stringArg(args, "workspace"));
         const fix = boolArg(args, "fix") === true;
-        if (fix && !canManage(ctx))
+        if (fix && !writeToolsEnabled(runtime.config))
+            throw new Error("写入工具已关闭（writeTools=false），无法自动修复。");
+        if (fix && !canManage(ctx, runtime.config))
             throw new Error("只有 owner 或本工作区的维护任务可以自动修复。");
         const actions = fix ? service.repair() : [];
         const report = service.validate();
         const text = formatValidation(report);
         return textResult(actions.length > 0 ? `${text}\n\n修复：${actions.join("；")}` : text);
     });
-    register("people_scan_mark", "记录某个会话/频道的扫描进度；full=true 时同时更新全量扫描时间。供扫描任务调用。", {
+    register("people_scan_mark", "记录某个会话/频道的扫描进度；full=true 时同时更新全量扫描时间。仅 owner 或内部维护任务可用。", {
         type: "object",
         additionalProperties: false,
         required: ["channel"],
@@ -409,6 +451,8 @@ export function registerTools(api, runtime) {
             full: { type: "boolean" },
         },
     }, (args, ctx) => {
+        if (!canManage(ctx, runtime.config))
+            throw new Error("记录扫描进度仅限 owner 或内部维护任务。");
         const service = toolService(runtime, ctx);
         const channel = stringArg(args, "channel");
         if (!channel)
@@ -426,7 +470,9 @@ export function registerTools(api, runtime) {
             service.db.setScanMeta(lastScanAt);
         return textResult(`已记录扫描进度：${channel} @ ${lastScanAt}`);
     });
-    register("people_bootstrap", "初始化当前工作区的识人库，并导入旧 JSON（如果存在）。可重复执行。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_bootstrap", "初始化当前工作区的识人库，并导入旧 JSON（如果存在）。可重复执行。仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+        if (!canManage(ctx, runtime.config))
+            throw new Error("初始化识人库仅限 owner 或内部维护任务。");
         const workspace = stringArg(args, "workspace");
         if (workspace && workspace !== ctx.workspaceDir && ctx.senderIsOwner !== true) {
             throw new Error("只有 owner 可以初始化其他工作区。");
@@ -434,7 +480,7 @@ export function registerTools(api, runtime) {
         const service = toolService(runtime, ctx, workspace);
         return textResult(`${formatStatus(service)}\n初始化完成。`);
     });
-    register("people_backup", "为当前工作区创建一致的 SQLite 与 JSON 备份，并清理超出保留数量的旧备份。", {
+    register("people_backup", "为当前工作区创建一致的 SQLite 与 JSON 备份，并清理超出保留数量的旧备份。仅 owner 或内部维护任务可用。", {
         type: "object",
         additionalProperties: false,
         properties: {
@@ -442,10 +488,9 @@ export function registerTools(api, runtime) {
             workspace: { type: "string", description: "目标工作区；默认当前工作区。" },
         },
     }, (args, ctx) => {
+        if (!canManage(ctx, runtime.config))
+            throw new Error("备份识人库仅限 owner 或内部维护任务。");
         const workspace = stringArg(args, "workspace");
-        if (workspace && workspace !== ctx.workspaceDir && !canManage(ctx)) {
-            throw new Error("只能备份当前工作区的识人库。");
-        }
         const service = toolService(runtime, ctx, workspace);
         const keepRaw = typeof args.keep === "number" ? args.keep : 14;
         const report = service.backup(keepRaw);
@@ -456,7 +501,9 @@ export function registerTools(api, runtime) {
             `保留 ${report.kept} 份${report.removedOld ? `，清理旧文件 ${report.removedOld} 个` : ""}。`,
         ].join("\n"));
     });
-    register("people_health", "检查当前工作区识人库的维护风险：校验错误、孤儿记录、重复人物、过密画像、缺备份等。只读。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_health", "检查当前工作区识人库的维护风险：校验错误、孤儿记录、重复人物、过密画像、缺备份等。只读，仅 owner 或内部维护任务可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+        if (!canManage(ctx, runtime.config))
+            throw new Error("健康检查仅限 owner 或内部维护任务。");
         const service = toolService(runtime, ctx, stringArg(args, "workspace"));
         const report = service.health();
         const lines = [
@@ -486,12 +533,9 @@ export function registerTools(api, runtime) {
             force_backup: { type: "boolean" },
         },
     }, (args, ctx) => {
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("维护周期仅限 owner 或内部维护任务。");
         const workspace = stringArg(args, "workspace");
-        if (workspace && workspace !== ctx.workspaceDir && !canManage(ctx)) {
-            throw new Error("只能维护当前工作区。");
-        }
         const service = toolService(runtime, ctx, workspace);
         const report = service.cycle({
             backupKeep: typeof args.backup_keep === "number" ? args.backup_keep : 14,
@@ -523,7 +567,7 @@ export function registerTools(api, runtime) {
             limit: { type: "number" },
         },
     }, (args, ctx) => {
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("搜索全局记忆仅限 owner 或内部维护任务。");
         const service = toolService(runtime, ctx);
         const report = service.search(stringArg(args, "query") ?? "", typeof args.limit === "number" ? args.limit : 10);
@@ -574,8 +618,10 @@ export function registerTools(api, runtime) {
                 .map((dimension) => `${dimension.key} · ${dimension.label} · ${dimension.active ? "启用" : "停用"} · sort=${dimension.sort}`)
                 .join("\n"));
         }
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("修改维度仅限 owner 或内部维护任务。");
+        if (!writeToolsEnabled(runtime.config))
+            throw new Error("写入工具已关闭（writeTools=false），无法修改维度。");
         const key = stringArg(args, "key");
         if (!key)
             throw new Error("key 不能为空。");
@@ -594,7 +640,7 @@ export function registerTools(api, runtime) {
             confirm: { type: "boolean" },
         },
     }, (args, ctx) => {
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("合并人物仅限 owner 或内部维护任务。");
         if (boolArg(args, "confirm") !== true)
             throw new Error("合并人物需要 confirm=true。");
@@ -616,7 +662,7 @@ export function registerTools(api, runtime) {
             confirm: { type: "boolean" },
         },
     }, (args, ctx) => {
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("解绑人物仅限 owner 或内部维护任务。");
         if (boolArg(args, "confirm") !== true)
             throw new Error("解绑人物需要 confirm=true。");
@@ -635,7 +681,7 @@ export function registerTools(api, runtime) {
             confirm: { type: "boolean" },
         },
     }, (args, ctx) => {
-        if (!canManage(ctx))
+        if (!canManage(ctx, runtime.config))
             throw new Error("账号归并仅限 owner 或内部维护任务。");
         if (boolArg(args, "confirm") !== true)
             throw new Error("账号归并需要 confirm=true。");

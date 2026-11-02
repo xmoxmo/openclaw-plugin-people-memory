@@ -26,7 +26,7 @@ description: "自动识人：people 插件每轮注入 <people_context> 画像�
 2. 本人说「叫我X」→ `people_name { call_name: "X" }`。
 3. 本人第一人称明确说出事实（所在地、身份、偏好、关系、近期计划）→ `people_remember { content, dimension }`。
 4. 群规、里程碑、接口或功能变更 → `people_note { summary, category }`。
-5. 查详细画像 → `people_lookup`；查群 → `people_lookup { group: "<chat_id>" }`。
+5. 查详细画像 → `people_lookup`；查当前群 → `people_lookup { group: "<chat_id>" }`（非 owner 只能查当前群）。
 
 称呼优先级：call_name → confirmed_name → 平台昵称。称呼不脑补，不用 traits.basic_name 顶替。
 

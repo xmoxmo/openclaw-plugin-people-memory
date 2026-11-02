@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.4 — 安全边界与严格模式（2026-11-02）
+
+- 新增严格模式 `internalAdminAgents`：默认不设置时保持原有行为（无发送者的内部任务视为维护身份）；设置后只允许名单内 agent 作为内部管理员。用于收紧 cron / heartbeat / subagent 与公开入口共用「无 requesterSenderId」带来的提权面。
+- 新增 `writeTools` 开关（默认 `true`）：独立控制写类工具。`capture` 仍只控制自动采集，关闭它不会再被误解为禁止工具写入；需要禁止写入时显式设 `writeTools: false`。
+- `people_forget` 新增 `purge` 选项（默认关闭）：显式彻底清除时同时删除备份快照和旧 JSON 归档，避免删除后历史数据仍留在 backups / legacy 文件中。不可恢复，需显式传 `purge: true`。
+- 权限一致性：非 owner 只能查询/写入当前群的群记忆；`purge`、`people_status`、`people_health`、`people_backup`、`people_bootstrap`、`people_scan_mark` 统一要求 owner 或内部维护身份。
+- `people_status` 与 `openclaw people status` 显示当前安全模式，未启用严格模式时提示可启用。
+- 文档补充安全边界：哪些问题属于设计取舍（同意流程、群成员校验、定时采集批准、宿主机权限、社区频道），以及默认行为为何保持不变。
+- 新增鉴权、配置归一化与 purge 的回归测试。
+
 ## 0.0.3 — 发布链路验证（2026-11-01）
 
 - 验证 GitHub Actions OIDC 自动发布链路（tag → npm publish --provenance）；无功能变更。

@@ -107,7 +107,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 | `people_name` | 设置 call_name / confirmed_name / 人物名 | 自己；owner 可指定他人 |
 | `people_note` | 追加群记忆 | 当前群成员 |
 | `people_bind` | 账号绑定到人物，合并画像 | owner |
-| `people_forget` | 删除匹配的印象/特征；`scope` 可限定只删 impressions 或 traits | 自己；owner 或内部周期任务可指定他人/人物 |
+| `people_forget` | 删除匹配的印象/特征；`scope` 限定范围；`purge: true` 同时清除备份与旧归档（不可恢复） | 自己；owner 或内部周期任务可指定他人/人物 |
 | `people_validate` | 一致性校验，可选修复 | 读取所有；修复仅 owner |
 | `people_scan_mark` | 记录扫描进度 | 扫描任务 |
 | `people_bootstrap` | 建库、导入旧 JSON | 所有 agent（其他工作区仅 owner） |
@@ -212,4 +212,38 @@ main 和 orion 共用一套库，由一个 home 周期任务处理 `agent:main` 
 - 数据库按工作区隔离（默认 `<stateDir>/plugins/people/<workspace-key>/people.db`），不同工作区互不可见。
 - `people_lookup` 对非 owner 只允许查自己。
 - 注入内容只给当前 agent，不进入对外回复；提示词明确要求不要原样展示。
-- 如需彻底删除某人数据，用 `people_forget` 或直接删除该工作区的 `people.db`（后者会丢全部记忆，先备份）。
+- 默认 `people_forget` 只删活动库；备份快照和旧 JSON 归档仍会保留。需要彻底清除时显式传 `purge: true`，它会同时删除 `backups/` 与旧归档（不可恢复）。
+
+## 安全边界与严格模式
+
+默认配置与旧版本行为一致：没有 `requesterSenderId` 的轮次（cron、heartbeat、subagent、公开入口）按内部维护身份处理。这保证了定时维护开箱即用，但把「内部任务」和「公开入口」放在了同一类。需要收紧时开启严格模式：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "people": {
+        "config": {
+          "internalAdminAgents": ["main", "orion"],
+          "writeTools": true
+        }
+      }
+    }
+  }
+}
+```
+
+- `internalAdminAgents`：一旦设置（哪怕是空数组），无发送者轮次只有名单内 agent 能执行维护类操作。**启用后要把运行周期任务的 agent 也列进来**，否则 `people_cycle` 会被拒绝。不设置则保持兼容默认。
+- `writeTools`：写类工具总开关，默认 `true`。`capture` 只控制入站自动采集，`injectContext` 只控制注入；两者都不等于禁止工具写入。
+- 非 owner 只能查询或写入当前群的群记忆；跨群读写需要 owner 或内部维护身份。`people_forget` 的 `purge` 也仅限 owner 或内部维护身份。
+- `people_status` / `openclaw people status` 会显示当前安全模式；兼容模式下会提示可以启用严格模式。
+
+### 明确不做的部分及原因
+
+- **不做强制同意弹窗**：插件只记录触发 agent 回复的发送者，不主动扫描潜水用户；强制弹窗会破坏自动记忆，也会让普通群聊无法使用。运营方应在部署说明里告知采集范围，或用 `capture: false` 关闭自动采集。
+- **不在工具层做群成员 ACL**：群记忆只在该群会话中注入，跨账号查询已经限 owner；再叠加频道各自的成员 API 会把插件绑死在特定平台，违背「频道无关」的目标。
+- **定时采集不自动安装**：插件不创建 automation，周期任务由运营方显式建立——这一步本身就是「单独批准」。
+- **不管理宿主机权限**：工具可见性和沙箱由 OpenClaw 与 agent 策略控制，不属于插件包范围。
+- **ClawHub readiness 的 `official` 项**：社区包不在官方频道，该项按设计就是 FAIL，不需要修。
+
+ClawHub 的自动安全评审目前给 `review / suspicious`，关注点是知情同意、共享访问控制和删除完整性。前两项属于产品与部署边界，第三项已通过 `purge` 提供显式路径；默认行为保持不变。
