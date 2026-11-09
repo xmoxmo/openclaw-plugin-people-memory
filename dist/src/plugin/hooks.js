@@ -1,80 +1,96 @@
+import { resolveStorePaths, resolveWorkspaceRoot } from "../core/paths.js";
 import { isAgentDisabled } from "./config.js";
-import { hookChatId, hookChatTitle, hookIsGroup, hookPlatform, hookSenderName, inboundGroupTitle, inboundPlatform, } from "./identity.js";
+import { resolveHookIdentity, resolveInboundIdentity, } from "./identity.js";
 const CAPTURE_INTERVAL_MS = 30_000;
-export function registerHooks(api, runtime) {
+const DEFERRED_INTERVAL_MS = 5 * 60_000;
+export function registerHooks(api, runtime, identities = runtime.identities) {
     const lastCapture = new Map();
-    const pendingIdentity = new Map();
-    api.on("inbound_claim", ((event) => {
+    const lastDeferred = new Map();
+    const logger = runtime.api.logger;
+    const observe = (event, context) => {
+        const workspaceDir = context?.workspaceDir?.trim() ||
+            resolveWorkspaceRoot(runtime.api.config, context?.agentId ?? event.agentId);
+        const workspaceKey = workspaceDir
+            ? resolveStorePaths({ workspaceDir, config: runtime.config }).workspaceKey
+            : undefined;
+        const identity = resolveInboundIdentity(event, runtime.config, context, workspaceKey);
+        if (identity)
+            identities.put(identity);
+    };
+    api.on("inbound_claim", ((event, context) => {
         try {
-            const senderId = event.senderId?.trim();
-            if (!senderId)
-                return undefined;
-            const platform = inboundPlatform(event, runtime.config);
-            const at = Date.now();
-            const entry = {
-                senderName: event.senderName?.trim() || undefined,
-                chatTitle: inboundGroupTitle(event),
-                isGroup: event.isGroup === true,
-                at,
-            };
-            pendingIdentity.set(`${platform}:${senderId}`, entry);
-            if (event.sessionKey)
-                pendingIdentity.set(`session:${event.sessionKey}`, entry);
-            if (pendingIdentity.size > 500) {
-                for (const [key, value] of pendingIdentity) {
-                    if (at - value.at > 10 * 60_000)
-                        pendingIdentity.delete(key);
-                }
-            }
+            observe(event, context);
         }
-        catch {
-            // passive observer only
+        catch { /* passive observer only */ }
+        return undefined;
+    }));
+    api.on("message_received", ((event, context) => {
+        // This host event does not carry senderIsOwner. Only inbound_claim may
+        // bind a tool-side owner claim; observing here must never revive one.
+        try {
+            observe({ ...event, senderIsOwner: undefined }, context);
         }
+        catch { /* passive observer only */ }
         return undefined;
     }));
     api.on("before_prompt_build", ((event, ctx) => {
         try {
             if (isAgentDisabled(runtime.config, ctx.agentId))
                 return undefined;
-            const senderId = ctx.senderId?.trim();
-            if (!senderId)
+            const service = runtime.get({ workspaceDir: ctx.workspaceDir, agentId: ctx.agentId });
+            const workspaceKey = service.paths.workspaceKey;
+            if (ctx.sessionKey)
+                identities.registerWorkspace(ctx.sessionKey, workspaceKey);
+            const hasInboundBackend = identities.hasBackend(workspaceKey, ctx.sessionKey, ctx.runId);
+            const pending = identities.get(workspaceKey, ctx.sessionKey, ctx.runId, ctx.channel ?? ctx.messageProvider, ctx.senderId);
+            const identity = resolveHookIdentity(ctx, runtime.config, pending, workspaceKey, hasInboundBackend ? undefined : ctx.sessionKey);
+            const senderId = identity?.senderId?.trim();
+            if (!identity || !senderId)
                 return undefined;
-            const service = runtime.get({
-                workspaceDir: ctx.workspaceDir,
-                agentId: ctx.agentId,
-                agentDir: undefined,
-            });
-            const platform = hookPlatform(ctx, runtime.config);
-            const chatId = hookChatId(ctx);
-            const pending = pendingIdentity.get(`${platform}:${senderId}`) ??
-                (ctx.sessionKey ? pendingIdentity.get(`session:${ctx.sessionKey}`) : undefined);
-            const chatTitle = hookChatTitle(ctx) ?? pending?.chatTitle;
-            const isGroup = hookIsGroup(ctx) || pending?.isGroup === true;
+            const now = Date.now();
+            if (identity.source === "deferred") {
+                const key = workspaceKey + "|" + ctx.sessionKey + "|" + senderId;
+                const previous = lastDeferred.get(key) ?? 0;
+                if (runtime.config.capture !== false && now - previous >= DEFERRED_INTERVAL_MS) {
+                    lastDeferred.set(key, now);
+                    service.capture({
+                        platform: identity.platform,
+                        senderId,
+                        agentId: ctx.agentId,
+                        source: "deferred",
+                    });
+                }
+                return undefined;
+            }
+            if (identity.source === "session_fallback" && pending?.source !== "session_fallback") {
+                logger.warn("[people] BNCR backend required sessionKey fallback; standard inbound metadata was unavailable");
+            }
+            const platform = identity.platform;
+            const chatId = identity.chatId;
             let groupId;
             if (runtime.config.capture !== false) {
-                const captureKey = `${service.paths.workspaceKey}|${platform}|${senderId}`;
-                const now = Date.now();
+                const captureKey = workspaceKey + "|" + platform + "|" + senderId;
                 const previous = lastCapture.get(captureKey) ?? 0;
                 if (now - previous >= CAPTURE_INTERVAL_MS) {
                     lastCapture.set(captureKey, now);
                     const result = service.capture({
                         platform,
                         senderId,
-                        senderName: hookSenderName(ctx) ?? pending?.senderName,
+                        senderName: identity.senderName,
                         chatId,
-                        chatTitle,
-                        isGroup,
+                        chatTitle: identity.chatTitle,
+                        isGroup: identity.isGroup === true,
                         agentId: ctx.agentId,
+                        source: identity.source,
                     });
                     groupId = result.groupId;
                 }
             }
             if (runtime.config.injectContext === false)
                 return undefined;
-            if (!groupId && chatId) {
+            if (!groupId && chatId)
                 groupId = service.db.findGroup(platform, chatId)?.group_id;
-            }
-            const accountId = service.resolveAccountForLookup(platform, senderId)?.account_id;
+            const accountId = service.db.getAccountByPlatformSender(platform, senderId)?.account_id;
             if (!accountId)
                 return undefined;
             const card = service.contextCard({
@@ -85,17 +101,17 @@ export function registerHooks(api, runtime) {
             });
             if (!card)
                 return undefined;
-            if (runtime.config.debug) {
-                runtime.api.logger.info(`[people] inject ${accountId} bytes=${card.length} promptBytes=${event.prompt.length}`);
-            }
+            if (runtime.config.debug)
+                logger.info("[people] injected context bytes=" + card.length);
             return { prependContext: card };
         }
         catch (error) {
-            runtime.api.logger.warn(`[people] before_prompt_build failed: ${error.message}`);
+            logger.warn("[people] before_prompt_build failed: " + error.message);
             return undefined;
         }
     }), { timeoutMs: 3000 });
     api.on("gateway_stop", () => {
+        identities.clear();
         runtime.closeAll();
     });
 }

@@ -1,5 +1,3 @@
-const GENERIC_ACCOUNTS = new Set(["default", "main", "primary", "0", "none", "-"]);
-
 function clean(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -24,29 +22,34 @@ export function parsePlatformFolder(folder: string): string {
 export function resolvePlatform(params: {
   channel?: string;
   provider?: string;
-  accountId?: string;
   metadataPlatform?: string;
+  backend?: string;
+  backendChannels?: string[];
   template?: string;
   overrides?: Record<string, string>;
 }): string {
   const metadataPlatform = clean(params.metadataPlatform);
   const channel = clean(params.provider) ?? clean(params.channel);
-  const account = clean(params.accountId);
+  const backend = clean(params.backend);
 
   if (metadataPlatform && (!channel || metadataPlatform.toLowerCase().startsWith(channel.toLowerCase()))) {
     return normalizePlatform(metadataPlatform);
   }
   if (!channel) return normalizePlatform(metadataPlatform ?? "unknown");
+  const backendChannels = params.backendChannels ?? ["bncr"];
+  if (backend && backendChannels.some((item) => item.toLowerCase() === channel.toLowerCase())) {
+    return normalizePlatform(`${channel}/${backend}`);
+  }
 
   const overrideKey = Object.keys(params.overrides ?? {}).find(
     (key) => key.toLowerCase() === channel.toLowerCase(),
   );
-  const template = (overrideKey ? params.overrides?.[overrideKey] : undefined) ?? params.template ?? "{channel}/{account}";
-  const usableAccount = account && !GENERIC_ACCOUNTS.has(account.toLowerCase()) ? account : "";
+  const template = (overrideKey ? params.overrides?.[overrideKey] : undefined) ?? params.template ?? "{channel}";
   const rendered = template
     .replaceAll("{channel}", channel)
-    .replaceAll("{account}", usableAccount)
-    .replaceAll("{accountId}", usableAccount);
+    .replaceAll("{backend}", "")
+    .replaceAll("{account}", "")
+    .replaceAll("{accountId}", "");
 
   const cleaned = rendered
     .split("/")

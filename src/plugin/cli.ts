@@ -29,6 +29,15 @@ function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function describeCapture(capture: {
+  lastAt: string | null;
+  standardCount: number;
+  sessionFallbackCount: number;
+  deferredCount: number;
+}): string {
+  return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 挂起 ${capture.deferredCount}`;
+}
+
 function workspaceFor(api: OpenClawPluginApi, options: CliOptions): { workspaceDir: string; agentId?: string } {
   const agentId = typeof options.agent === "string" ? options.agent : undefined;
   const workspaceDir =
@@ -82,10 +91,15 @@ export function registerCli(api: OpenClawPluginApi, runtime: PeopleRuntime): voi
           console.log(describeCounts(status.counts));
           console.log(`最近全量扫描: ${status.lastFullScanAt ?? "无"}`);
           console.log(`旧 JSON 导入: ${status.legacyImportedAt ?? "无"}`);
+          console.log(describeCapture(status.capture));
+          const svc = status.maintenance;
           console.log(
-            status.security.strictInternalAdmin
-              ? `安全模式: 严格 (内部管理员: ${status.security.internalAdminAgents?.join(", ") || "无"}; 写入工具: ${status.security.writeTools ? "开" : "关"})`
-              : "安全模式: 兼容 (默认行为; 可设置 internalAdminAgents 收紧内部提权)",
+            svc
+              ? `后台维护: ${svc.active ? "运行中" : "未运行"}; 启动 ${svc.startedAt ?? "无"}; 最近调度 ${svc.scheduledAt ?? "无"}; 最近完成 ${svc.completedAt ?? "无"}; 最近失败 ${svc.lastError ?? "无"}`
+              : "后台维护: 无状态",
+          );
+          console.log(
+            `授权链: owner 只认宿主本轮 senderIsOwner=true; 写入工具: ${status.security.writeTools ? "开" : "关"}`,
           );
         });
 
@@ -153,6 +167,7 @@ export function registerCli(api: OpenClawPluginApi, runtime: PeopleRuntime): voi
           if (options.json) return printJson(report);
           console.log(`${report.ok ? "OK" : "FAIL"} ${report.dbPath}`);
           console.log(`最近备份: ${report.lastBackupAt ?? "无"}`);
+          console.log(describeCapture(report.capture));
           console.log(describeCounts(report.counts));
           for (const issue of report.issues) console.log(`[${issue.level}] ${issue.code}: ${issue.message}`);
         });
@@ -168,17 +183,26 @@ export function registerCli(api: OpenClawPluginApi, runtime: PeopleRuntime): voi
         .option("--json", "Print JSON")
         .action(async (options: CliOptions = {}) => {
           const { workspaceDir, agentId } = workspaceFor(api, options);
-          const report = runtime.get({ workspaceDir, agentId }).cycle({
+          const report = await runtime.runMaintenanceCycle({ workspaceDir, agentId }, {
             backupKeep: options.keep ? Number(options.keep) : 14,
             backupIntervalHours: options.intervalHours ? Number(options.intervalHours) : 20,
             forceBackup: options.forceBackup === true,
           });
+          if (!report) {
+            console.log("本工作区已有维护轮次在执行，本轮跳过。");
+            return;
+          }
           if (options.json) return printJson(report);
           console.log(`周期: ${report.cycledAt}`);
           console.log(report.backup ? `备份: ${report.backup.dbBackup}` : "备份: 跳过");
           console.log(`自动修复: ${report.repairActions.length ? report.repairActions.join("；") : "无"}`);
           console.log(`健康: ${report.health.ok ? "ok" : "error"}，待办 ${report.actions.length} 项`);
-          for (const action of report.actions) console.log(`[${action.kind}] ${action.target}: ${action.message}`);
+          console.log(
+            `内部语义压缩: ${report.semantic.unavailable ? "不可用，原文保留" : `完成 ${report.semantic.compacted}/${report.semantic.processed}`}; 失败 ${report.semantic.failed}; 剩余 ${report.semantic.remaining}`,
+          );
+          if (runtime.config.debug) {
+            for (const action of report.actions) console.log(`[${action.kind}] ${action.target}: ${action.message}`);
+          }
         });
 
       people

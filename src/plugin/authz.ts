@@ -1,33 +1,57 @@
 import type { PeoplePluginConfig } from "../core/types.js";
-import { realpathOrResolve } from "../core/paths.js";
-
 export type AuthzContext = {
   agentId?: string;
   requesterSenderId?: string | null;
   senderIsOwner?: boolean;
 };
 
-/** A turn without a trusted requester sender is an internal/system turn. */
-export function isInternalTurn(ctx: AuthzContext): boolean {
-  return !ctx.requesterSenderId?.trim();
+export type OwnerClaimContext = {
+  workspaceKey: string;
+  sessionKey: string;
+  senderId: string;
+};
+
+export type OwnerClaimStore = {
+  claims: Set<string>;
+};
+
+export function createOwnerClaimStore(): OwnerClaimStore {
+  return { claims: new Set<string>() };
+}
+
+export function ownerClaimKey(ctx: OwnerClaimContext): string {
+  return [ctx.workspaceKey, ctx.sessionKey, ctx.senderId].join("\u0000");
+}
+
+/** Bind a host-trusted inbound owner bit to exactly one workspace/session/sender. */
+export function claimOwnerForTurn(store: OwnerClaimStore, ctx: OwnerClaimContext): void {
+  store.claims.add(ownerClaimKey(ctx));
+}
+
+/** Consume a single-use exact owner claim; no cross-sender inheritance or fallback. */
+export function consumeOwnerClaim(store: OwnerClaimStore, ctx: OwnerClaimContext): boolean {
+  const key = ownerClaimKey(ctx);
+  if (!store.claims.has(key)) return false;
+  store.claims.delete(key);
+  return true;
+}
+
+export function clearOwnerClaims(store: OwnerClaimStore): void {
+  store.claims.clear();
+}
+
+/** Drop any stale claim before admitting a fresh host-trusted owner event. */
+export function resetOwnerClaim(store: OwnerClaimStore, ctx: OwnerClaimContext): void {
+  store.claims.delete(ownerClaimKey(ctx));
 }
 
 /**
- * Internal turns keep the historical privileged behavior unless the operator
- * opts into strict mode with `internalAdminAgents`. Once that list is set (even
- * to an empty array), only listed agent ids may act as internal admins. This
- * closes the gap where a public gateway run also has no requester sender.
+ * Agent tools trust exactly one host-provided owner bit for the current turn.
+ * A missing requester sender is an unauthenticated turn, not an admin turn:
+ * plugin-owned maintenance never reaches this check through agent tools.
  */
-export function isInternalAdmin(ctx: AuthzContext, config: PeoplePluginConfig): boolean {
-  if (!isInternalTurn(ctx)) return false;
-  const allow = config.internalAdminAgents;
-  if (allow === undefined) return true;
-  const agentId = ctx.agentId?.trim();
-  return Boolean(agentId && allow.includes(agentId));
-}
-
-export function canManage(ctx: AuthzContext, config: PeoplePluginConfig): boolean {
-  return ctx.senderIsOwner === true || isInternalAdmin(ctx, config);
+export function canManage(ctx: AuthzContext): boolean {
+  return ctx.senderIsOwner === true;
 }
 
 /** Write tools default to on; operators can turn them off explicitly. */
@@ -51,21 +75,14 @@ export const WRITE_TOOL_NAMES = new Set([
   "people_scan_mark",
 ]);
 
-/**
- * Only owners may target another workspace. Internal maintenance identities
- * remain scoped to the workspace that started the turn.
- */
+/** Agent tools are bound to the workspace of the session agent that admitted the turn. */
 export function authorizeWorkspace(
-  ctx: AuthzContext,
   requested: string | undefined,
   current: string | undefined,
 ): string | undefined {
-  if (!requested || ctx.senderIsOwner === true) return requested;
-  if (!current?.trim()) throw new Error("无法确认当前工作区，不能指定其他工作区。");
-  if (realpathOrResolve(requested) !== realpathOrResolve(current)) {
-    throw new Error("只有 owner 可以访问其他工作区。");
-  }
-  return requested;
+  if (!requested) return undefined;
+  if (!current?.trim()) throw new Error("无法确认当前会话 agent 的工作区；不接受跨工作区参数。");
+  throw new Error("识人工具只使用当前会话 agent 的工作区；请在该工作区的 agent 会话中操作。");
 }
 
 /** Whether a resolved group is the conversation the caller is currently in. */

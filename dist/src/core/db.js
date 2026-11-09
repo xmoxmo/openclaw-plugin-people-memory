@@ -555,6 +555,15 @@ export class PeopleDatabase {
             .run(ownerType, ownerId, `%${match.trim()}%`);
         return number(result.changes);
     }
+    removeImpressionsByIds(ownerType, ownerId, ids) {
+        if (ids.length === 0)
+            return 0;
+        const placeholders = ids.map(() => "?").join(", ");
+        const result = this.db
+            .prepare(`DELETE FROM impressions WHERE owner_type=? AND owner_id=? AND id IN (${placeholders})`)
+            .run(ownerType, ownerId, ...ids);
+        return number(result.changes);
+    }
     removeTraitsMatching(ownerType, ownerId, match) {
         const result = this.db
             .prepare("DELETE FROM traits WHERE owner_type=? AND owner_id=? AND value LIKE ?")

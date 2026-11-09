@@ -7,13 +7,23 @@ import { PeopleService } from "../dist/src/core/service.js";
 import { encodeWorkspaceSegment, resolveStorePaths, resolveWorkspaceRoot } from "../dist/src/core/paths.js";
 import { resolvePlatform, platformLookupKey } from "../dist/src/core/platform.js";
 import { normalizeConfig } from "../dist/src/plugin/config.js";
+import { PeopleRuntime } from "../dist/src/plugin/runtime.js";
+import { registerMaintenanceService, readMaintenanceServiceState } from "../dist/src/plugin/service.js";
+import { runSemanticMaintenance } from "../dist/src/plugin/maintenance.js";
+import { retireLegacyCycleCrons } from "../dist/src/plugin/legacy-cron.js";
+import {
+  resolveInboundIdentity,
+  resolveHookIdentity,
+  resolveToolIdentity,
+} from "../dist/src/plugin/identity.js";
 import {
   authorizeWorkspace,
   canManage,
+  createOwnerClaimStore,
   groupMatchesCurrent,
-  isInternalAdmin,
   WRITE_TOOL_NAMES,
 } from "../dist/src/plugin/authz.js";
+import { IdentityStore } from "../dist/src/plugin/identity-store.js";
 
 function tempWorkspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "people-test-"));
@@ -30,17 +40,17 @@ function open(workspace, config = {}) {
 }
 
 test("platform labels stay channel neutral", () => {
-  assert.equal(resolvePlatform({ provider: "bncr", accountId: "tgBot" }), "bncr/tgBot");
+  assert.equal(resolvePlatform({ provider: "bncr", backend: "tgBot" }), "bncr/tgBot");
   assert.equal(resolvePlatform({ channel: "telegram" }), "telegram");
-  assert.equal(resolvePlatform({ channel: "telegram", accountId: "default" }), "telegram");
-  assert.equal(resolvePlatform({ channel: "discord", accountId: "work" }), "discord/work");
+  assert.equal(resolvePlatform({ channel: "telegram", backend: "default" }), "telegram");
+  assert.equal(resolvePlatform({ channel: "discord", backend: "work" }), "discord");
   assert.equal(
-    resolvePlatform({ channel: "telegram", accountId: "default", overrides: { telegram: "telegram" } }),
+    resolvePlatform({ channel: "telegram", backend: "default", overrides: { telegram: "telegram" } }),
     "telegram",
   );
   assert.equal(platformLookupKey("bncr/tgBot"), platformLookupKey("bncr:tgBot"));
   // No alias concept: GewePlus and GolemPlus stay separate platform labels.
-  assert.equal(resolvePlatform({ provider: "bncr", accountId: "GolemPlus" }), "bncr/GolemPlus");
+  assert.equal(resolvePlatform({ provider: "bncr", backend: "GolemPlus" }), "bncr/GolemPlus");
   assert.equal(resolvePlatform({ metadataPlatform: "bncr/GolemPlus" }), "bncr/GolemPlus");
 });
 
@@ -264,16 +274,19 @@ test("inbound identity fills sender name when channelContext is absent", async (
   entry.register(api);
   await hooks.inbound_claim({
     channel: "bncr",
-    accountId: "tgBot",
+    accountId: "Primary",
     senderId: "u9",
     senderName: "频道昵称",
     isGroup: true,
     conversationId: "-900",
-    metadata: { group_subject: "频道群名" },
+    metadata: {
+      to: "Bncr:tgBot:-900:0",
+      group_subject: "频道群名",
+    },
   });
   const result = await hooks.before_prompt_build(
     { prompt: "hi" },
-    { workspaceDir: workspace, agentId: "tester", senderId: "u9", channel: "bncr", accountId: "tgBot", chatId: "-900" },
+    { workspaceDir: workspace, agentId: "tester", senderId: "u9", channel: "bncr", accountId: "Primary", chatId: "-900" },
   );
   assert.match(result.prependContext, /频道昵称/);
   assert.match(result.prependContext, /频道群名/);
@@ -690,44 +703,31 @@ test("merging accounts preserves conflicting trait values instead of dropping th
   );
 });
 
-test("strict internal admin is opt-in and keeps the compatible default", () => {
-  // Default: an internal turn (no requester sender) keeps historical admin access.
-  assert.equal(canManage({ agentId: "main" }, {}), true);
-  assert.equal(isInternalAdmin({ agentId: "main" }, {}), true);
+test("agent tools trust only the host owner bit and never infer an internal admin", () => {
+  // A turn without a sender is unauthenticated; plugin maintenance uses internal calls.
+  assert.equal(canManage({ agentId: "main" }), false);
+  assert.equal(canManage({}), false);
+  assert.equal(canManage({ agentId: "main", requesterSenderId: "u1" }), false);
+  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: false }), false);
+  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }), true);
 
-  // A normal non-owner sender never manages other profiles.
-  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: false }, {}), false);
-  // Owner always manages.
-  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }, {}), true);
-
-  // Strict mode: only listed agents act as internal admins.
-  const strict = { internalAdminAgents: ["main"] };
-  assert.equal(canManage({ agentId: "main" }, strict), true);
-  assert.equal(canManage({ agentId: "public" }, strict), false);
-  // A public gateway run has no sender and no known agent id.
-  assert.equal(canManage({}, strict), false);
-  // An explicit empty list denies all internal admin without affecting owner.
-  assert.equal(canManage({ agentId: "main" }, { internalAdminAgents: [] }), false);
-  assert.equal(canManage({ requesterSenderId: "u1", senderIsOwner: true }, { internalAdminAgents: [] }), true);
-
-  // Internal maintenance identities cannot switch to another workspace.
   const current = tempWorkspace();
   const other = tempWorkspace();
-  assert.equal(authorizeWorkspace({ agentId: "main" }, current, current), current);
-  assert.throws(() => authorizeWorkspace({ agentId: "main" }, other, current), /只有 owner/);
-  assert.equal(authorizeWorkspace({ requesterSenderId: "u1", senderIsOwner: true }, other, current), other);
+  assert.equal(authorizeWorkspace(undefined, current), undefined);
+  assert.equal(authorizeWorkspace("", current), undefined);
+  assert.throws(() => authorizeWorkspace(other, current), /只使用当前会话 agent 的工作区/);
+  assert.throws(() => authorizeWorkspace(current, current), /只使用当前会话 agent 的工作区/);
+  assert.throws(() => authorizeWorkspace(other, undefined), /无法确认当前会话 agent 的工作区/);
 });
 
-test("config keeps write tools on by default and accepts strict mode", () => {
+test("config keeps write tools on by default and ignores local admin allowlists", () => {
   const defaults = normalizeConfig({});
   assert.equal(defaults.writeTools, true);
-  assert.equal(defaults.internalAdminAgents, undefined);
+  assert.equal("internalAdminAgents" in defaults, false);
 
   const strict = normalizeConfig({ internalAdminAgents: ["main", " home "], writeTools: false });
-  assert.deepEqual(strict.internalAdminAgents, ["main", "home"]);
+  assert.equal("internalAdminAgents" in strict, false);
   assert.equal(strict.writeTools, false);
-
-  assert.deepEqual(normalizeConfig({ internalAdminAgents: [] }).internalAdminAgents, []);
   assert.equal(WRITE_TOOL_NAMES.has("people_merge_account"), true);
 });
 
@@ -772,4 +772,610 @@ test("forget purge removes backups and legacy archives only when requested", () 
   service.close();
   const wal = path.join(root, "people.db-wal");
   assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, "purge truncates the WAL");
+});
+
+test("identity resolution uses standard fields, BNCR fallback and no host account ids", () => {
+  const config = normalizeConfig({});
+  const standard = resolveInboundIdentity({
+    channel: "bncr", accountId: "Primary", senderId: "user-1",
+    conversationId: "-100",
+    metadata: { to: "Bncr:tgBot:-100:0" },
+  }, config);
+  assert.equal(standard.platform, "bncr/tgBot");
+  assert.equal(standard.backend, "tgBot");
+  assert.equal(standard.source, "standard");
+  assert.equal(standard.chatId, "-100");
+
+  const telegram = resolveInboundIdentity({
+    channel: "telegram", accountId: "work", senderId: "user-1",
+    conversationId: "-200",
+    sessionKey: "agent:main:telegram:group:" + Buffer.from("tgBot:-100", "utf8").toString("hex"),
+    metadata: { to: "Bncr:tgBot:-100:0" },
+  }, config);
+  assert.equal(telegram.platform, "telegram");
+  assert.equal(telegram.backend, undefined);
+  assert.equal(telegram.source, "standard");
+  assert.equal(telegram.chatId, "-200");
+
+  const hex = Buffer.from("Bncr:GewePlus:-300:0", "utf8").toString("hex");
+  const fallback = resolveInboundIdentity({
+    channel: "bncr", accountId: "Primary", senderId: "user-2",
+    sessionKey: "agent:main:bncr:group:" + hex,
+    metadata: {},
+  }, config);
+  assert.equal(fallback.platform, "bncr/GewePlus");
+  assert.equal(fallback.source, "session_fallback");
+  assert.equal(fallback.chatId, "-300");
+  assert.equal(fallback.isGroup, true);
+
+  const standardWins = resolveInboundIdentity({
+    channel: "bncr", accountId: "Primary", senderId: "user-2",
+    sessionKey: "agent:main:bncr:group:" + hex,
+    metadata: { to: "Bncr:tgBot:-100:0" },
+  }, config);
+  assert.equal(standardWins.platform, "bncr/tgBot");
+  assert.equal(standardWins.source, "standard");
+
+  const hook = resolveHookIdentity({
+    channel: "bncr", accountId: "Primary", senderId: "user-2",
+    chatId: hex,
+  }, config, standardWins);
+  assert.equal(hook.platform, "bncr/tgBot");
+  assert.equal(hook.chatId, "-100");
+
+  const tool = resolveToolIdentity({
+    messageChannel: "bncr", agentAccountId: "Primary", requesterSenderId: "user-2",
+    nativeChannelId: hex,
+    sessionKey: "agent:main:bncr:group:" + hex,
+  }, config, standardWins);
+  assert.equal(tool.platform, "bncr/tgBot");
+  assert.equal(tool.chatId, "-100");
+});
+
+test("BNCR standard metadata writes the backend row while Primary stays out of identity", async () => {
+  const entry = (await import("../dist/index.js")).default;
+  const workspace = tempWorkspace();
+  const hooks = {};
+  const factories = {};
+  let toolCtx = { workspaceDir: workspace, senderIsOwner: true };
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people" },
+    config: { agents: { defaults: { workspace }, entries: {} } },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: (name, handler) => { hooks[name] = handler; },
+    registerTool: (factory) => { const tool = factory(toolCtx); factories[tool.name] = factory; },
+    registerCli: () => {},
+    id: "people", name: "People", source: "test", registrationMode: "runtime",
+  };
+  entry.register(api);
+  const sessionKey = "agent:main:bncr:group:" + Buffer.from("Bncr:tgBot:-900:0", "utf8").toString("hex");
+  await hooks.inbound_claim({
+    channel: "bncr", accountId: "Primary", senderId: "u9", senderName: "频道昵称",
+    isGroup: true, sessionKey,
+    metadata: { to: "Bncr:tgBot:-900:0", group_subject: "频道群名" },
+  });
+  const injected = await hooks.before_prompt_build(
+    { prompt: "hi" },
+    { workspaceDir: workspace, agentId: "tester", senderId: "u9", channel: "bncr", accountId: "Primary", chatId: sessionKey.split(":").pop(), sessionKey },
+  );
+  assert.match(injected.prependContext, /频道昵称/);
+  const status = await tools.people_status.execute("status", {});
+  assert.match(status.content[0].text, /标准 1/);
+  toolCtx = {
+    workspaceDir: workspace,
+    senderIsOwner: true,
+    requesterSenderId: undefined,
+    messageChannel: "bncr",
+    sessionKey,
+  };
+  const lookup = await tools.people_lookup.execute(
+    "lookup",
+    { account: "bncr/tgBot:u9" },
+  );
+  assert.match(lookup.content[0].text, /频道昵称/);
+});
+
+test("standard host to/originatingTo wins over sessionKey fallback and workspace stays isolated", () => {
+  const config = normalizeConfig({});
+  const hex = Buffer.from("Bncr:GolemPlus:-700:0", "utf8").toString("hex");
+  const sessionKey = "agent:main:bncr:group:" + hex;
+  const event = {
+    senderId: "u-standard",
+    senderName: "标准字段",
+    sessionKey,
+    metadata: {
+      channelId: "bncr",
+      conversationId: "-700",
+      from: "u-standard",
+      to: "Bncr:tgBot:-100:0",
+      originatingTo: "Bncr:GewePlus:-100:0",
+    },
+  };
+  const standard = resolveInboundIdentity(event, config, { channelId: "bncr", conversationId: sessionKey.split(":").pop() }, "home");
+  assert.equal(standard.platform, "bncr/tgBot");
+  assert.equal(standard.source, "standard");
+  assert.equal(standard.chatId, "-100");
+
+  const hook = resolveHookIdentity(
+    { channel: "bncr", senderId: "u-standard", chatId: sessionKey.split(":").pop(), sessionKey },
+    config,
+    standard,
+    "home",
+  );
+  assert.equal(hook.platform, "bncr/tgBot");
+
+  const store = new IdentityStore();
+  store.put({ ...standard, workspaceKey: "home" });
+  assert.equal(store.get("home", sessionKey)?.["platform"], "bncr/tgBot");
+  assert.equal(store.get("public", sessionKey), undefined);
+  store.clear();
+});
+
+test("owner lookup works without a current sender account row", async () => {
+  const entry = (await import("../dist/index.js")).default;
+  const workspace = tempWorkspace();
+  const factories = {};
+  let toolCtx = { workspaceDir: workspace };
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people" },
+    config: { agents: { defaults: { workspace }, entries: {} } },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: () => {},
+    registerTool: (factory) => {
+      const tool = factory(toolCtx);
+      factories[tool.name] = factory;
+    },
+    registerCli: () => {},
+    id: "people", name: "People", source: "test", registrationMode: "runtime",
+  };
+  entry.register(api);
+  const service = open(workspace);
+  service.capture({ platform: "bncr/tgBot", senderId: "target", senderName: "被查的人" });
+  service.close();
+  toolCtx = { workspaceDir: workspace, senderIsOwner: true, messageChannel: "telegram" };
+  const allowed = await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target" });
+  assert.match(allowed.content[0].text, /被查的人/);
+  toolCtx = {
+    workspaceDir: workspace,
+    senderIsOwner: false,
+    requesterSenderId: "guest",
+    messageChannel: "telegram",
+    sessionKey: "agent:main:telegram:direct:guest",
+  };
+  let deniedError;
+  try {
+    await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target" });
+  } catch (error) {
+    deniedError = error;
+  }
+  assert.match(deniedError?.message ?? "", /暂时不能查询他人画像/);
+});
+
+test("owner authority is only the current host-trusted bit", () => {
+  assert.equal(canManage({ requesterSenderId: "owner-1", senderIsOwner: false }), false);
+  assert.equal(canManage({ requesterSenderId: "owner-1", senderIsOwner: undefined }), false);
+  assert.equal(canManage({ requesterSenderId: "owner-1", senderIsOwner: true }), true);
+  assert.equal(
+    canManage({ requesterSenderId: "owner-1", senderIsOwner: false, ownerAccountId: "bncr/tgBot:owner-1" }),
+    false,
+  );
+});
+
+test("inbound owner claims match one workspace, session and sender exactly", () => {
+  const claims = createOwnerClaimStore();
+  const store = new IdentityStore();
+  const claim = { workspaceKey: "home", sessionKey: "session-1", senderId: "owner-1" };
+  store.ownerClaims.claims.add(["home", "session-1", "owner-1"].join(String.fromCharCode(0)));
+  assert.equal(claims.claims.size, 0, "claim state is scoped to its explicit store");
+  assert.equal(store.consumeOwnerClaim({ ...claim, workspaceKey: "public" }), false);
+  assert.equal(store.consumeOwnerClaim({ ...claim, sessionKey: "session-2" }), false);
+  assert.equal(store.consumeOwnerClaim({ ...claim, senderId: "guest" }), false);
+  assert.equal(store.ownerClaimState(claim).pending, true);
+  assert.equal(store.consumeOwnerClaim(claim), true);
+  assert.equal(store.ownerClaimState(claim).pending, false);
+  assert.equal(store.consumeOwnerClaim(claim), false, "claim is consumed once");
+});
+
+test("blank requester sender is not an internal maintenance authorization", () => {
+  assert.equal(canManage({ requesterSenderId: null }), false);
+  assert.equal(canManage({ requesterSenderId: "  " }), false);
+  assert.equal(canManage({ requesterSenderId: "guest" }), false);
+});
+
+test("status is de-identified and diagnostics stay owner-only", async () => {
+  const entry = (await import("../dist/index.js")).default;
+  const workspace = tempWorkspace();
+  const factories = {};
+  let toolCtx = {};
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people", importLegacy: false },
+    config: { agents: { defaults: { workspace }, entries: { main: { workspace } } } },
+    runtime: {},
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: () => {},
+    registerTool: (factory) => { const tool = factory(toolCtx); factories[tool.name] = factory; },
+    registerService: () => {},
+    registerCli: () => {},
+    id: "people", name: "People", source: "test", registrationMode: "runtime",
+  };
+  entry.register(api);
+  const service = open(workspace);
+  service.capture({ platform: "telegram", senderId: "private-sender", senderName: "隐私姓名" });
+  service.remember({ accountId: "telegram:private-sender", content: "住在某个地方" });
+  service.close();
+
+  toolCtx = { workspaceDir: workspace, agentId: "main", requesterSenderId: "guest", sessionKey: "guest-session" };
+  const status = await tools.people_status.execute("status", {});
+  const plain = status.content[0].text;
+  assert.match(plain, /识人库状态/);
+  assert.doesNotMatch(plain, /dbPath|数据库|workspace|工作区|隐私姓名|private-sender|住在某个地方/);
+  await assert.rejects(() => tools.people_health.execute("health", {}), /诊断信息仅 owner/);
+  await assert.rejects(() => tools.people_validate.execute("validate", {}), /诊断信息仅 owner/);
+  await assert.rejects(() => tools.people_cycle.execute("cycle", {}), /诊断信息仅 owner/);
+
+  toolCtx = { ...toolCtx, senderIsOwner: true };
+  for (const name of ["people_status", "people_health", "people_validate"]) {
+    const result = await tools[name].execute(name, {});
+    assert.match(result.content[0].text, /数据库|dbPath|工作区|识人库健康检查|校验/);
+  }
+  const ownerCycle = await tools.people_cycle.execute("cycle", {});
+  assert.match(ownerCycle.content[0].text, /识人维护|后台 service/);
+
+  const other = tempWorkspace();
+  await assert.rejects(() => tools.people_status.execute("status", { workspace: other }), /只使用当前会话 agent 的工作区/);
+});
+
+test("a fresh host owner event replaces the single-use claim", async () => {
+  const store = new IdentityStore();
+  const event = {
+    channel: "telegram", platform: "telegram", source: "standard",
+    sessionKey: "session-1", runId: "run-1", senderId: "owner-1",
+    senderIsOwner: true, workspaceKey: "home", at: Date.now(),
+  };
+  store.put(event);
+  assert.equal(store.consumeOwnerClaim({ workspaceKey: "home", sessionKey: "session-1", senderId: "owner-1" }), true);
+  assert.equal(store.consumeOwnerClaim({ workspaceKey: "home", sessionKey: "session-1", senderId: "owner-1" }), false);
+  store.put({ ...event, runId: "run-2", at: Date.now() + 1 });
+  assert.equal(store.consumeOwnerClaim({ workspaceKey: "home", sessionKey: "session-1", senderId: "owner-1" }), true);
+
+  const passive = new IdentityStore();
+  passive.put({ ...event, runId: "run-3", senderIsOwner: undefined, at: Date.now() });
+  assert.equal(passive.consumeOwnerClaim({ workspaceKey: "home", sessionKey: "session-1", senderId: "owner-1" }), false);
+});
+
+test("retired cron cleanup removes only plugin-owned cycle jobs", async () => {
+  const jobs = [
+    { id: "cycle-home", name: "people-cycle-home", description: "旧识人任务" },
+    { id: "cycle-public", name: "people-cycle-public", description: "people_cycle" },
+    { id: "scan-public", name: "people-scan-public", description: "识人扫描" },
+    { id: "declaration", name: "people-cycle-declarative", description: "识人周期维护", declarationKey: "people:cycle" },
+    { id: "custom", name: "people-cycle-custom", description: "用户自建任务" },
+    { id: "custom-reference", name: "people-cycle-custom", description: "people_cycle 文档备份" },
+    { id: "other", name: "daily-sync", description: "people_cycle 文档备份" },
+    { id: "person-scan-wind", name: "person-scan-wind", description: "旧识人任务" },
+    { id: "person-scan-rain", name: "person-scan-rain", description: "旧识人任务" },
+    { id: "declared-payload", name: "people-cycle-managed", description: "托管周期", declarationKey: "people:cycle", payload: { kind: "agentTurn", message: "people_cycle 周期维护" } },
+    { id: "declared-no-evidence", name: "people-cycle-declared", description: "用户托管任务", declarationKey: "people:custom", payload: { kind: "agentTurn", message: "自有维护" } },
+  ];
+  const removed = [];
+  const cron = {
+    list: async () => jobs,
+    remove: async (id) => { removed.push(id); return { removed: true }; },
+  };
+  const api = { logger: { info: () => {}, warn: () => {} } };
+  assert.equal(await retireLegacyCycleCrons(() => cron, api), 7);
+  assert.deepEqual(removed, ["cycle-home", "cycle-public", "scan-public", "declaration", "person-scan-wind", "person-scan-rain", "declared-payload"]);
+  assert.ok(jobs.some((job) => job.id === "custom-reference"), "user job with a tool name in its description is preserved");
+  assert.ok(jobs.some((job) => job.id === "declared-no-evidence"), "user-declared job without plugin cycle evidence is preserved");
+  assert.equal(await retireLegacyCycleCrons(undefined, api), 0);
+});
+
+test("inbound identity cache is workspace scoped and can be bound later", () => {
+  const home = new IdentityStore();
+  const publicStore = new IdentityStore();
+  const sessionKey = "agent:main:bncr:group:shared-session";
+  const identity = {
+    channel: "bncr",
+    backend: "tgBot",
+    platform: "bncr/tgBot",
+    source: "standard",
+    sessionKey,
+    runId: "run-1",
+    senderId: "u-isolated",
+    at: Date.now(),
+  };
+  home.put(identity);
+  assert.equal(home.get(undefined, sessionKey), undefined);
+  home.registerWorkspace(sessionKey, "home");
+  assert.equal(home.get("home", sessionKey)?.platform, "bncr/tgBot");
+  assert.equal(home.get("public", sessionKey), undefined);
+  assert.equal(publicStore.get("home", sessionKey), undefined);
+  home.clear();
+  assert.equal(home.get("home", sessionKey), undefined);
+});
+
+test("BNCR canonical target and a single-use inbound owner claim stay in one session", async () => {
+  const entry = (await import("../dist/index.js")).default;
+  const workspace = tempWorkspace();
+  const hooks = {};
+  const factories = {};
+  let toolCtx = {};
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people" },
+    config: { agents: { defaults: { workspace }, entries: {} } },
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: (name, handler) => { hooks[name] = handler; },
+    registerTool: (factory) => { const tool = factory(toolCtx); factories[tool.name] = factory; },
+    registerCli: () => {},
+    id: "people",
+    name: "People",
+    source: "test",
+    registrationMode: "runtime",
+  };
+  entry.register(api);
+  const service = open(workspace);
+  service.capture({ platform: "bncr/tgBot", senderId: "target-2", senderName: "被查的人 2" });
+  service.close();
+  const sessionKey = "agent:main:bncr:group:" + Buffer.from("Bncr:tgBot:-901:0", "utf8").toString("hex");
+  await hooks.inbound_claim({
+    channel: "bncr",
+    accountId: "Primary",
+    senderId: "owner-1",
+    senderIsOwner: true,
+    isGroup: true,
+    sessionKey,
+    metadata: { to: "Bncr:tgBot:-901:0" },
+  });
+  toolCtx = {
+    workspaceDir: workspace,
+    agentId: "tester",
+    requesterSenderId: "owner-1",
+    messageChannel: "bncr",
+    sessionKey: "agent:main:bncr:group:other-session",
+  };
+  let otherSessionError;
+  try {
+    await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target-2" });
+  } catch (error) {
+    otherSessionError = error;
+  }
+  assert.match(otherSessionError?.message ?? "", /暂时不能查询他人画像/);
+  toolCtx = { ...toolCtx, sessionKey };
+  const allowed = await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target-2" });
+  assert.match(allowed.content[0].text, /被查的人 2/);
+  let laterTurnError;
+  try {
+    await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target-2" });
+  } catch (error) {
+    laterTurnError = error;
+  }
+  assert.match(laterTurnError?.message ?? "", /暂时不能查询他人画像/);
+  const otherWorkspace = tempWorkspace();
+  toolCtx = { ...toolCtx, workspaceDir: otherWorkspace };
+  let deniedError;
+  try {
+    await tools.people_lookup.execute("lookup", { account: "bncr/tgBot:target-2" });
+  } catch (error) {
+    deniedError = error;
+  }
+  assert.match(deniedError?.message ?? "", /暂时不能查询他人画像|没有找到账号/);
+});
+
+test("a host-only owner claim is admitted before owner-gated tool checks", async () => {
+  const entry = (await import("../dist/index.js")).default;
+  const workspace = tempWorkspace();
+  const hooks = {};
+  const factories = {};
+  let toolCtx = {};
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people", importLegacy: false },
+    config: { agents: { defaults: { workspace }, entries: { main: { workspace } } } },
+    runtime: {},
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: (name, handler) => { hooks[name] = handler; },
+    registerTool: (factory) => { const tool = factory(toolCtx); factories[tool.name] = factory; },
+    registerService: () => {},
+    registerCli: () => {},
+    id: "people", name: "People", source: "test", registrationMode: "runtime",
+  };
+  entry.register(api);
+  const service = open(workspace);
+  service.capture({ platform: "telegram", senderId: "claim-target", senderName: "目标" });
+  service.close();
+  const sessionKey = "agent:main:telegram:direct:claim-session";
+  await hooks.inbound_claim({
+    channel: "telegram", senderId: "owner-2", senderIsOwner: true, isGroup: false, sessionKey,
+    metadata: { conversationId: "claim-session" },
+  });
+  toolCtx = {
+    workspaceDir: workspace, agentId: "main", requesterSenderId: "owner-2",
+    messageChannel: "telegram", sessionKey,
+  };
+  const plainStatus = await tools.people_status.execute("status", {});
+  assert.doesNotMatch(plainStatus.content[0].text, /数据库|工作区/, "status is a non-privileged view");
+  const health = await tools.people_health.execute("health", {});
+  assert.match(health.content[0].text, /识人库健康检查/);
+  await assert.rejects(
+    () => tools.people_health.execute("health", {}),
+    /诊断信息仅 owner/,
+    "the claim is consumed once",
+  );
+});
+
+test("plugin-owned maintenance compacts profiles through an isolated completion", async () => {
+  const workspace = tempWorkspace();
+  const service = open(workspace);
+  service.capture({ platform: "telegram", senderId: "compact-owner", senderName: "压缩对象" });
+  for (let index = 0; index < 14; index += 1) {
+    service.remember({ accountId: "telegram:compact-owner", content: `事实 ${index}` });
+  }
+  const cycle = service.cycle({ backupKeep: 2, forceBackup: true });
+  const action = cycle.actions.find((item) => item.kind === "compact");
+  assert.ok(action);
+  const before = service.db.listImpressions("account", "telegram:compact-owner", 50);
+  const complete = async (request) => {
+    const prompt = JSON.parse(request.message);
+    assert.equal(prompt.ownerId, "telegram:compact-owner");
+    assert.ok(prompt.impressions.length > 3);
+    assert.ok(prompt.allowedDimensions.some((dimension) => dimension.key === "preference"));
+    return JSON.stringify({
+      dimensions: [{ dimension: "preference", value: "有 14 条可核验事实" }],
+      coveredIds: prompt.impressions.slice(0, -2).map((item) => item.id),
+      keepIds: prompt.impressions.slice(-2).map((item) => item.id),
+    });
+  };
+  const result = await runSemanticMaintenance({
+    service,
+    actions: cycle.actions,
+    complete,
+    agentId: "main",
+    signal: AbortSignal.timeout(10_000),
+    validateOk: cycle.health.ok,
+    lastBackupAt: cycle.health.lastBackupAt,
+  });
+  assert.equal(result.processed, 1);
+  assert.equal(result.compacted, 1);
+  assert.equal(result.failed, 0);
+  const after = service.db.listImpressions("account", "telegram:compact-owner", 50);
+  assert.equal(after.length, 2, "covered originals are removed inside the plugin");
+  assert.ok(after.length < before.length);
+  assert.equal(
+    service.db.getTraits("account", "telegram:compact-owner").find((trait) => trait.dimension === "preference")?.value,
+    "有 14 条可核验事实",
+  );
+  service.close();
+});
+
+test("background service schedules one cycle per distinct workspace", async () => {
+  const homeWorkspace = tempWorkspace();
+  const publicWorkspace = tempWorkspace();
+  let registration;
+  const scheduled = [];
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people", importLegacy: false },
+    config: {
+      agents: {
+        defaults: { workspace: homeWorkspace },
+        entries: {
+          main: { workspace: homeWorkspace },
+          orion: { workspace: homeWorkspace },
+          public: { workspace: publicWorkspace },
+        },
+      },
+    },
+    runtime: {},
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+  };
+  const runtime = new PeopleRuntime(api);
+  registerMaintenanceService({ ...api, registerService: (svc) => { registration = svc; } }, runtime);
+  assert.ok(registration);
+  const serviceState = readMaintenanceServiceState(runtime);
+  assert.ok(serviceState);
+  const scheduler = {
+    signal: new AbortController().signal,
+    schedule: (job) => { scheduled.push(job); return { cancel() {}, async stop() {} }; },
+  };
+  const failures = [];
+  const serviceHealth = { reportFailure: (error) => failures.push(error), clearFailure: () => {} };
+  await registration.start({ scheduler, config: api.config, workspaceDir: homeWorkspace, serviceHealth });
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].everyMs, 6 * 60 * 60_000);
+  assert.equal(scheduled[0].mode, "replace");
+  const hosts = runtime.resolveMaintenanceWorkspaces({ config: api.config });
+  assert.equal(hosts.length, 2, "home and public are distinct; main/orion share one");
+  assert.equal(serviceState.startedAt.length > 0, true);
+  const homeStatus = open(homeWorkspace).status();
+  assert.equal(homeStatus.maintenance.active, true);
+  assert.equal(homeStatus.maintenance.startedAt, serviceState.startedAt);
+  await scheduled[0].run();
+  assert.equal(failures.length, 0, "scheduled cycle completes in the test host");
+  const completed = open(homeWorkspace).status();
+  assert.equal(completed.maintenance.completedAt, serviceState.completedAt);
+  const secondRuntime = new PeopleRuntime(api);
+  const persisted = secondRuntime.maintenanceSummary({ workspaceDir: homeWorkspace, agentId: "main" });
+  assert.equal(persisted?.healthOk, true);
+  assert.equal(typeof persisted?.cycledAt, "string");
+  secondRuntime.closeAll();
+  await registration.stop({ scheduler, config: api.config });
+  assert.equal(readMaintenanceServiceState(runtime), null);
+  assert.equal(open(homeWorkspace).status().maintenance.active, false);
+});
+
+test("owner-only maintenance diagnostics can be triggered from the host bit", async () => {
+  const workspace = tempWorkspace();
+  const entry = (await import("../dist/index.js")).default;
+  const hooks = {};
+  const factories = {};
+  let toolCtx = {};
+  const tools = new Proxy({}, { get: (_, name) => factories[name](toolCtx) });
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people", importLegacy: false },
+    config: { agents: { defaults: { workspace }, entries: { main: { workspace } } } },
+    runtime: {},
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    on: (name, handler) => { hooks[name] = handler; },
+    registerTool: (factory) => { const tool = factory(toolCtx); factories[tool.name] = factory; },
+    registerService: () => {},
+    registerCli: () => {},
+    id: "people",
+    name: "People",
+    source: "test",
+    registrationMode: "runtime",
+  };
+  entry.register(api);
+  toolCtx = { workspaceDir: workspace, agentId: "main" };
+  await assert.rejects(
+    () => tools.people_cycle.execute("cycle", { run: true }),
+    /诊断信息仅 owner 可查看/,
+  );
+  toolCtx = { workspaceDir: workspace, agentId: "main", senderIsOwner: true };
+  const result = await tools.people_cycle.execute("cycle", { run: true });
+  assert.match(result.content[0].text, /识人维护摘要|识人维护周期/);
+  assert.doesNotMatch(result.content[0].text, /事实 \d+|压缩对象/);
+});
+
+test("maintenance service startup and stop failures are persisted in the workspace DB", async () => {
+  const workspace = tempWorkspace();
+  const api = {
+    pluginConfig: { dataDir: "{workspace}/people", importLegacy: false },
+    config: { agents: { defaults: { workspace }, entries: { main: { workspace } } } },
+    runtime: {},
+    logger: { info: () => {}, warn: () => {} },
+  };
+  const runtime = new PeopleRuntime(api);
+  let registration;
+  registerMaintenanceService({ ...api, registerService: (svc) => { registration = svc; } }, runtime);
+  const failures = [];
+  const serviceHealth = { reportFailure: (error) => failures.push(error), clearFailure: () => {} };
+  await assert.rejects(
+    () => registration.start({ config: api.config, workspaceDir: workspace, serviceHealth }),
+    /requires host scheduler/,
+  );
+  let status = open(workspace).status();
+  assert.equal(status.maintenance.active, false);
+  assert.equal(status.maintenance.lastError, "people-maintenance requires host scheduler (apiVersion 2)");
+  assert.ok(status.maintenance.stoppedAt);
+  assert.equal(failures.length, 1);
+
+  runtime.closeAll();
+  const emptyRuntime = new PeopleRuntime({ ...api, pluginConfig: { ...api.pluginConfig }, config: { agents: { entries: {} } } });
+  let noHostRegistration;
+  registerMaintenanceService({ ...api, registerService: (svc) => { noHostRegistration = svc; } }, emptyRuntime);
+  const scheduler = {
+    signal: new AbortController().signal,
+    schedule: () => ({ cancel() {}, async stop() {} }),
+  };
+  await noHostRegistration.start({ scheduler, config: { agents: { entries: {} } }, workspaceDir: workspace, serviceHealth });
+  status = open(workspace).status();
+  assert.equal(status.maintenance.active, false);
+  assert.equal(status.maintenance.lastError, "no enabled workspace agents");
+  assert.equal(readMaintenanceServiceState(emptyRuntime).lastError, "no enabled workspace agents");
+  await noHostRegistration.stop({ scheduler });
+  assert.equal(readMaintenanceServiceState(emptyRuntime), null);
+  emptyRuntime.closeAll();
 });

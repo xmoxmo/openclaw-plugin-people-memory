@@ -741,6 +741,21 @@ export class PeopleDatabase {
     return number(result.changes);
   }
 
+  removeImpressionsByIds(
+    ownerType: "account" | "person",
+    ownerId: string,
+    ids: number[],
+  ): number {
+    if (ids.length === 0) return 0;
+    const placeholders = ids.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(
+        `DELETE FROM impressions WHERE owner_type=? AND owner_id=? AND id IN (${placeholders})`,
+      )
+      .run(ownerType, ownerId, ...ids);
+    return number(result.changes);
+  }
+
   removeTraitsMatching(ownerType: "account" | "person", ownerId: string, match: string): number {
     const result = this.db
       .prepare("DELETE FROM traits WHERE owner_type=? AND owner_id=? AND value LIKE ?")

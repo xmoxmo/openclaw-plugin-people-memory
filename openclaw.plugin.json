@@ -2,7 +2,7 @@
   "id": "people",
   "name": "People Memory",
   "description": "Workspace-scoped people and group memory backed by SQLite.",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "skills": [
     "skills/people-identifier"
   ],
@@ -67,13 +67,6 @@
         },
         "description": "Sender ids (regex, case-insensitive) that never become people. Defaults to system/cron auto-rows like bncr-history-system."
       },
-      "internalAdminAgents": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "description": "Strict-mode allowlist for internal (no requester sender) admin turns such as cron, heartbeat and subagent. Omit to keep the compatible default; set to an array (even empty) to restrict internal admin to these agent ids. Cron cycle agents must be listed when strict mode is on."
-      },
       "writeTools": {
         "type": "boolean",
         "default": true,
@@ -85,8 +78,8 @@
       },
       "platformTemplate": {
         "type": "string",
-        "default": "{channel}/{account}",
-        "description": "Platform label template. {channel} and {account} are filled when available."
+        "default": "{channel}",
+        "description": "Identity-space template. {channel} is the host-normalized channel name; BNCR appends its backend from inbound metadata. Host accountId never enters identity."
       },
       "platformOverrides": {
         "type": "object",
@@ -94,7 +87,7 @@
           "type": "string"
         },
         "default": {},
-        "description": "Per-channel platform templates, for example {\"telegram\":\"telegram\"}."
+        "description": "Explicit per-channel identity-space templates, for example {\"telegram\":\"telegram\"}."
       },
       "multiAccountChannels": {
         "type": "array",
@@ -104,7 +97,7 @@
         "default": [
           "bncr"
         ],
-        "description": "Multi-backend channel names (e.g. bncr): account keys require a backend segment such as bncr/tgBot. Bare channel writes are deferred or merged into a backend row; bare rows are flagged and cleaned by health/repair."
+        "description": "Channels whose identity space requires a backend segment (e.g. bncr -> bncr/tgBot). Bare channel writes are deferred; bare rows are flagged and cleaned by health/repair."
       },
       "debug": {
         "type": "boolean",

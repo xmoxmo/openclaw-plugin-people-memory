@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-people-memory",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "private": false,
   "description": "Workspace-scoped people and group memory for OpenClaw agents, backed by SQLite.",
@@ -36,9 +36,7 @@
     "DESIGN.md",
     "LICENSE",
     "assets/**",
-    "skills",
-    "automation/README.md",
-    "automation/cycle.template.md"
+    "skills"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.6 — 稳定身份、宿主 owner 授权与内部自维护（2026-11-09）
+
+- 稳定身份改为「频道身份空间 + 用户 / 群 ID」：普通频道用频道名整体，BNCR 用 `bncr/后端` 整体；宿主 `accountId` / `Primary` 不再参与身份。入站优先读宿主标准字段，BNCR 标准字段缺后端时才回退解析 sessionKey 的 hex 段。
+- owner 授权只认宿主本轮 `senderIsOwner=true`；inbound_claim 按「工作区 + sessionKey + senderId」单次绑定、消费即删。删除 `internalAdminAgents` 与「无发送者即内部管理员」的插件自造授权链。
+- 注册插件后台 `people-maintenance` service：按工作区用宿主 scheduler 定时执行确定性维护、内部隔离 completion 画像压缩、内部写回和计数摘要；`runtime.llm.complete` 与 `runtime.subagent.complete` 均支持，不做普通 agent 回退。
+- `people_cycle` 默认改为只读维护摘要；owner 可用 `run: true` 手动触发同一套插件内部逻辑。后台维护不再通过 agent 工具提权。
+- 清理现有 `people-cycle-home` / `people-cycle-public` 外部 cron；旧周期提示词标记为历史参考，不随新流程运行。
+- 旧定时任务模板不再随包发布；`people-maintenance` service 启动时按已知名称与插件证据自动清理旧周期 cron，并保留手工只读核对入口。
+- agent 工具固定绑定当前会话 agent 的工作区，拒绝 `workspace` 参数切库；CLI operator 的 `--workspace` 保留。owner 权限以当前会话 agent 范围为界，不跨 agent 授权。
+- 状态和诊断分成两个入口：普通 agent 可用 `people_status` 看去标识化运行状态并查自己画像；`people_health` / `people_validate` / `people_cycle` 只向 owner 返回完整诊断，owner 可在 `people_status` 看详细计数与路径。
+- 修复 owner claim 在重复 hook 事件后的单次消费语义：只有宿主 `inbound_claim` 的新一轮 owner 标记可重建 claim，消费即删，不靠轮次缓存跨轮续权。
+- 后台维护状态与最近维护摘要写入工作区数据库 meta，CLI 和 Gateway 进程可以看到同一份心跳；同族证据合并增加 24 小时内备份门槛。
+- 同族人物绑定冲突在稳定身份证据充分时由插件内部合并；重复昵称与未绑定占位人物保持原状。
+- `people_status` 增加后台 service 启动、调度、完成与失败心跳；完整 health / validate 诊断仅 owner。
+- 文档与技能统一到新边界；补齐鉴权、后台 service、插件内部压缩、身份空间与 owner claim 回归测试。
+
 ## 0.0.5 — 隔离与写开关修复（2026-11-02）
 
 - 修复多个 `senderFamilies` 含同一 sender 时被拼接为一个身份的问题。每个 family 现在独立归并，跨 family 不会共享人物、特征或印象。

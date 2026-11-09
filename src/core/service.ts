@@ -108,6 +108,17 @@ export class PeopleService {
     const skipped = this.isSkippedSender(senderId);
     const target = this.resolveWriteTarget(platform, senderId);
     const writePlatform = target.kind === "direct" ? target.platform : platform;
+    const multiBackend = this.isBareMultiAccount(platform) || platform.includes("/");
+    const at = nowIso();
+    if (input.source === "deferred" || (multiBackend && target.kind === "deferred")) {
+      this.db.metaSet("capture_deferred_at", at);
+      this.db.metaSet("capture_deferred_count", String(Number(this.db.metaGet("capture_deferred_count") ?? 0) + 1));
+    } else if (input.source === "session_fallback") {
+      this.db.metaSet("capture_session_fallback_count", String(Number(this.db.metaGet("capture_session_fallback_count") ?? 0) + 1));
+    } else if (input.source === "standard" || input.source === "explicit") {
+      this.db.metaSet("capture_standard_count", String(Number(this.db.metaGet("capture_standard_count") ?? 0) + 1));
+    }
+    this.db.metaSet("capture_last_at", at);
     let accountId: string | null = null;
     let created = false;
     let displayNameChanged = false;
@@ -967,6 +978,14 @@ export class PeopleService {
   }
 
   health(): HealthReport {
+    const captureStatus = (): StatusReport["capture"] => ({
+      lastAt: this.db.metaGet("capture_last_at"),
+      deferredAt: this.db.metaGet("capture_deferred_at"),
+      standardCount: Number(this.db.metaGet("capture_standard_count") ?? 0),
+      sessionFallbackCount: Number(this.db.metaGet("capture_session_fallback_count") ?? 0),
+      deferredCount: Number(this.db.metaGet("capture_deferred_count") ?? 0),
+    });
+
     const validation = this.validate();
     const issues = validation.issues.filter((issue) => issue.level !== "info");
     const bindings = this.db.listAllPersonAccounts();
@@ -1008,7 +1027,7 @@ export class PeopleService {
           conflict.rows.map((row) => row.account_id).join(" 与 ") +
           "，人物 " +
           conflict.persons.join(" / ") +
-          "。由 owner 判断保留哪侧，再 people_unbind 另一侧。",
+          "。插件后台维护按稳定身份证据内部归一。",
       });
     }
     for (const account of this.db.listAllAccounts()) {
@@ -1067,6 +1086,7 @@ export class PeopleService {
       counts: validation.counts,
       issues,
       lastBackupAt,
+      capture: captureStatus(),
     };
   }
 
@@ -1111,7 +1131,7 @@ export class PeopleService {
           target: match?.[2] ?? "",
           ownerType: "person",
           message:
-            `同族接入绑到不同人物（${match?.[1] ?? "见 health 详情"}）。不自动改绑：向 owner 报告并给出建议（保留哪侧 + people_unbind 另一侧）。`,
+            `同族接入绑到不同人物（${match?.[1] ?? "见 health 详情"}）。插件后台凭稳定身份证据在内部合并并归一绑定，不交给 agent 判断。`,
         });
       } else if (issue.code === "unlinked_person") {
         const match = /^人物 (\S+)/.exec(issue.message);
@@ -1164,6 +1184,8 @@ export class PeopleService {
   // -------------------------------------------------------------------------
 
   status(): StatusReport {
+    const maintenanceStartedAt = this.db.metaGet("people_service_started_at");
+    const maintenanceStoppedAt = this.db.metaGet("people_service_stopped_at");
     return {
       workspaceDir: this.paths.workspaceDir,
       dataDir: this.paths.dataDir,
@@ -1173,9 +1195,25 @@ export class PeopleService {
       dimensions: this.db.listDimensions(),
       lastFullScanAt: this.db.getScanMeta().lastFullScanAt,
       legacyImportedAt: this.db.metaGet("legacy_imported_at"),
+      capture: {
+        lastAt: this.db.metaGet("capture_last_at"),
+        deferredAt: this.db.metaGet("capture_deferred_at"),
+        standardCount: Number(this.db.metaGet("capture_standard_count") ?? 0),
+        sessionFallbackCount: Number(this.db.metaGet("capture_session_fallback_count") ?? 0),
+        deferredCount: Number(this.db.metaGet("capture_deferred_count") ?? 0),
+      },
+      maintenance: {
+        active: Boolean(maintenanceStartedAt && (!maintenanceStoppedAt || maintenanceStoppedAt < maintenanceStartedAt)),
+        startedAt: maintenanceStartedAt,
+        stoppedAt: maintenanceStoppedAt,
+        intervalMs: Number(this.db.metaGet("people_service_interval_ms") ?? 0) || null,
+        scheduledAt: this.db.metaGet("people_service_scheduled_at"),
+        completedAt: this.db.metaGet("people_service_completed_at"),
+        lastSummary: this.db.metaGet("people_service_last_summary"),
+        lastError: this.db.metaGet("people_service_last_error"),
+      },
       security: {
-        strictInternalAdmin: this.config.internalAdminAgents !== undefined,
-        internalAdminAgents: this.config.internalAdminAgents ?? null,
+        ownerFromHost: true,
         writeTools: this.config.writeTools !== false,
       },
     };

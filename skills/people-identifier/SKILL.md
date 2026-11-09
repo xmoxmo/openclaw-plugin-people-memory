@@ -10,13 +10,13 @@ description: "自动识人：people 插件每轮注入 <people_context> 画像�
 ## 适用范围
 
 - 插件读取的是**通用入站元信息**：发送者 id、显示昵称、群标题、是否群聊。任何能提供这些的频道都能用，不绑定平台。
-- 平台标签由 `channel + accountId` 生成：普通频道用频道名；BNCR 一条接入带多个后端，accountId 是后端（`bncr/GewePlus`、`bncr/tgBot` 等）。
+- 稳定身份是「频道身份空间 + 用户 ID / 群 ID」：普通频道用频道名整体（`telegram`）；BNCR 用 `bncr/GewePlus`、`bncr/tgBot` 这类完整身份空间。宿主 `accountId` / `Primary` 不参与识人身份。
 - 同族自动归并只针对 GewePlus 与 GolemPlus（两者 senderid 空间一致）；别的频道没有这种同 id 双接入，本来就不需要归并。bot 识别靠群 botNames + `current_role=bot`，是通用逻辑。
 - 频道不提供昵称/群标题时，插件用 `inbound_claim` 被动补录，仍能建档。
 
 ## 数据从哪来
 
-- 插件按工作区定位 `<workspace>/people/people.db`，同一 workspaceDir 的 agent 共用一份，不同工作区互不可见。
+- 默认数据库位于 `<stateDir>/plugins/people/<workspace-key>/people.db`；同一 workspaceDir 的 agent 共用一份，不同工作区互不可见。
 - 每轮消息前自动建档、同步平台昵称与群标题，并注入 `<people_context>`。
 - 旧 JSON 只作归档，不再读写。
 
@@ -40,24 +40,22 @@ description: "自动识人：people 插件每轮注入 <people_context> 画像�
 
 ## 画像整理归并
 
-1. `people_lookup` 查看现有 traits 与 impressions。
-2. 按维度把 impressions 归并成精炼描述。
-3. `people_remember { dimension, mode: "replace", content }` 写回；replace 只更新 traits，不追加印象。
-4. `people_forget { scope: "impressions", match }` 删除被替代的原文，避免误删 traits。
-5. impressions 收敛在 1-3 条。
-6. 展示沿用插件卡片：称呼、初次见面、最近、各维度，只显示非空字段。
+画像压缩由插件后台 service 自动完成，不靠 agent 周期任务或用户触发。普通 agent 想确认运行是否正常用 `people_status`；`people_health` / `people_validate` / `people_cycle` 是 owner 诊断入口，普通 agent 不用这些工具。用户问「整理画像」时，说明后台已自动整理；owner 可按需 `people_cycle { run: true }` 手动触发一轮，仍不查看或修改画像原文。
+
+展示沿用插件卡片：称呼、初次见面、最近、各维度，只显示非空字段。
 
 ## 禁止
 
 - 直接读写 `people/` 下的 JSON 或 `people.db`。
 - 跑 `merge-platform-accounts`、`people-put`、`call-name` 这类旧工具。
 - 主动绑定人物；只有 owner 明确要求才 `people_bind`。
-- 把扫描流程、插件同步、cron 简报、工具报错写成群记忆或人物事实。
+- 不用画像里的 `current_role=owner`、昵称、sender ID 或历史会话判断 owner；宿主没有给本轮 `senderIsOwner=true` 就是普通发送者。
+- 把扫描流程、插件同步、维护简报、工具报错写成群记忆或人物事实；也不要手工执行画像 compact / merge。
 
 ## Failure / Escalation
 
 - `people_lookup` 报账号或群歧义（同 chat 多个后端行）→ 按提示改用精确 key `platform:chat_id`，不要猜。
 - 写入报「只允许查自己 / 需要 owner」→ 说明权限边界，不绕过。
 - 插件未加载或工具不存在 → 提示检查 `plugins.entries.people.enabled` 与沙箱 `alsoAllow`，不要改数据库。
-- 发现裸平台行、重复账号、孤儿成员等异常 → 交给周期任务的 `people_cycle` / `people_validate { fix: true }` 处理，不手工改库。
+- 发现裸平台行、重复账号、孤儿成员等异常 → 交给插件后台维护；普通 agent 只看 `people_status`，owner 可用 `people_health` 查看完整诊断，不手工改库。
 

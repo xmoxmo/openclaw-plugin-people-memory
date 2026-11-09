@@ -39,17 +39,9 @@ export function normalizeConfig(raw: unknown): PeoplePluginConfig {
       const skip = list("captureSkipSenders");
       return skip.length ? skip : undefined;
     })(),
-    internalAdminAgents: (() => {
-      const raw = value.internalAdminAgents;
-      if (raw === undefined) return undefined;
-      if (!Array.isArray(raw)) return undefined;
-      return raw
-        .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
-        .map((item) => item.trim());
-    })(),
     writeTools: bool("writeTools", true),
     importLegacy: bool("importLegacy", true),
-    platformTemplate: str("platformTemplate", "{channel}/{account}"),
+    platformTemplate: str("platformTemplate", "{channel}"),
     multiAccountChannels: (() => {
       const channels = list("multiAccountChannels");
       return channels.length ? channels : undefined;

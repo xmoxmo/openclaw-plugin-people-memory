@@ -9,7 +9,6 @@ export type PeoplePluginConfig = {
   capture?: boolean;
   captureGroups?: boolean;
   captureSkipSenders?: string[];
-  internalAdminAgents?: string[];
   writeTools?: boolean;
   importLegacy?: boolean;
   platformTemplate?: string;
@@ -128,6 +127,7 @@ export type CaptureInput = {
   isGroup?: boolean;
   agentId?: string;
   role?: string;
+  source?: "explicit" | "standard" | "session_fallback" | "deferred";
 };
 
 export type CaptureResult = {
@@ -161,9 +161,25 @@ export type StatusReport = {
   dimensions: Dimension[];
   lastFullScanAt: string | null;
   legacyImportedAt: string | null;
+  capture: {
+    lastAt: string | null;
+    deferredAt: string | null;
+    standardCount: number;
+    sessionFallbackCount: number;
+    deferredCount: number;
+  };
+  maintenance: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+    intervalMs: number | null;
+    scheduledAt: string | null;
+    completedAt: string | null;
+    lastSummary: string | null;
+    lastError: string | null;
+  };
   security: {
-    strictInternalAdmin: boolean;
-    internalAdminAgents: string[] | null;
+    ownerFromHost: true;
     writeTools: boolean;
   };
 };
@@ -185,6 +201,7 @@ export type HealthReport = {
   counts: Record<string, number>;
   issues: ValidationIssue[];
   lastBackupAt: string | null;
+  capture: StatusReport["capture"];
 };
 
 export type SearchReport = {
