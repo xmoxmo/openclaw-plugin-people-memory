@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.7 — 发布包完整性修复（2026-11-09）
+
+- 发布仓同步补入新增的 `dist/src/plugin/{identity-store,legacy-cron,maintenance,service}.js`，修复 0.0.6 npm 包入口引用 `service.js` 但文件缺失的问题。
+- 增加从 registry tarball 反查入口依赖与文件清单的门禁；源码、数据库、设计和行为不变。
+
 ## 0.0.6 — 稳定身份、宿主 owner 授权与内部自维护（2026-11-09）
 
 - 稳定身份改为「频道身份空间 + 用户 / 群 ID」：普通频道用频道名整体，BNCR 用 `bncr/后端` 整体；宿主 `accountId` / `Primary` 不再参与身份。入站优先读宿主标准字段，BNCR 标准字段缺后端时才回退解析 sessionKey 的 hex 段。
