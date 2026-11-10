@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   confirmed_name TEXT,
   call_name TEXT,
   current_role TEXT,
+  bot_hint TEXT NOT NULL DEFAULT 'unknown',
+  bot_hint_source TEXT,
   bound_person_id TEXT,
   first_seen TEXT NOT NULL,
   last_interaction TEXT NOT NULL,

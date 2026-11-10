@@ -29,8 +29,8 @@ export function normalizeConfig(raw: unknown): PeoplePluginConfig {
     injectContext: bool("injectContext", true),
     injectGroupMemory: bool("injectGroupMemory", true),
     injectMaxChars:
-      typeof value.injectMaxChars === "number" && value.injectMaxChars > 200
-        ? value.injectMaxChars
+      typeof value.injectMaxChars === "number" && Number.isFinite(value.injectMaxChars)
+        ? Math.max(201, Math.min(20_000, Math.trunc(value.injectMaxChars)))
         : 1200,
     disabledAgents: list("disabledAgents"),
     capture: bool("capture", true),
@@ -43,8 +43,10 @@ export function normalizeConfig(raw: unknown): PeoplePluginConfig {
     importLegacy: bool("importLegacy", true),
     platformTemplate: str("platformTemplate", "{channel}"),
     multiAccountChannels: (() => {
-      const channels = list("multiAccountChannels");
-      return channels.length ? channels : undefined;
+      if (value.multiAccountChannels === undefined) return undefined;
+      // An explicit empty list disables multi-account identity spaces. Only an
+      // omitted or invalid value inherits the built-in BNCR default.
+      return Array.isArray(value.multiAccountChannels) ? list("multiAccountChannels") : undefined;
     })(),
     platformOverrides: record("platformOverrides"),
     senderFamilies: (() => {
@@ -57,9 +59,11 @@ export function normalizeConfig(raw: unknown): PeoplePluginConfig {
         const labels = family
           .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
           .map((item) => item.trim());
-        if (labels.length >= 2) families.push(labels);
+        if (labels.length === 2) families.push(labels);
       }
-      return families.length > 0 ? families : undefined;
+      // An explicit empty list disables the built-in same-sender family
+      // defaults; an omitted value still inherits them from the service.
+      return families;
     })(),
     debug: bool("debug", false),
   };

@@ -2,14 +2,15 @@
   "id": "people",
   "name": "People Memory",
   "description": "Workspace-scoped people and group memory backed by SQLite.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "skills": [
     "skills/people-identifier"
   ],
   "activation": {
     "onStartup": true,
     "onCapabilities": [
-      "hook"
+      "hook",
+      "tool"
     ]
   },
   "configSchema": {
@@ -43,7 +44,9 @@
       },
       "injectMaxChars": {
         "type": "number",
-        "default": 1200
+        "default": 1200,
+        "minimum": 201,
+        "maximum": 20000
       },
       "disabledAgents": {
         "type": "array",
@@ -65,12 +68,12 @@
         "items": {
           "type": "string"
         },
-        "description": "Sender ids (regex, case-insensitive) that never become people. Defaults to system/cron auto-rows like bncr-history-system."
+        "description": "Additional sender ids or regexes (case-insensitive) that never become people. Built-in system/cron filters such as bncr-history-system always remain active."
       },
       "writeTools": {
         "type": "boolean",
         "default": true,
-        "description": "Master switch for tools that write (remember, name, note, bind, forget, merge, unbind, cycle, backup, scan mark). Default true. `capture` only controls automatic hook capture, not tool writes."
+        "description": "Master switch for write actions (remember, name, note, bot hint, bind, forget, merge, unbind, backup, scan mark, bootstrap, validation repair, and cycle run). Read-only status, lookup, validation, cycle summary, health, search, and dimensions remain available subject to owner rules. `capture` only controls automatic hook capture."
       },
       "importLegacy": {
         "type": "boolean",
@@ -110,7 +113,8 @@
           "items": {
             "type": "string"
           },
-          "minItems": 2
+          "minItems": 2,
+          "maxItems": 2
         },
         "default": [
           [
@@ -129,6 +133,7 @@
       "people_remember",
       "people_name",
       "people_note",
+      "people_bot_hint",
       "people_bind",
       "people_forget",
       "people_validate",

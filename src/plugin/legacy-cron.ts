@@ -61,13 +61,13 @@ export async function retireLegacyCycleCrons(
       try {
         await cron.remove(job.id);
         removed += 1;
-      } catch (error) {
-        api.logger.warn("[people] retired cron cleanup skipped for " + (job.name ?? job.id) + ": " + (error instanceof Error ? error.message : String(error)));
+      } catch {
+        api.logger.warn("[people] retired cron cleanup skipped for one plugin-owned job");
       }
     }
     if (removed > 0) api.logger.info("[people] removed " + removed + " retired external cycle cron job(s)");
-  } catch (error) {
-    api.logger.warn("[people] retired cron cleanup unavailable: " + (error instanceof Error ? error.message : String(error)));
+  } catch {
+    api.logger.warn("[people] retired cron cleanup unavailable");
   }
   return removed;
 }

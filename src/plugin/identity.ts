@@ -78,7 +78,6 @@ export type ResolvedIdentity = {
   isGroup?: boolean;
   sessionKey?: string;
   runId?: string;
-  senderIsOwner?: boolean;
   at: number;
 };
 
@@ -121,6 +120,21 @@ function hexDecode(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function decodedBncrSessionTarget(value: string | undefined): BncrTarget | undefined {
+  if (!value) return undefined;
+  const segment = value.split(":").pop()?.trim() ?? "";
+  if (segment.length < 8 || segment.length % 2 !== 0) return undefined;
+  const decoded = hexDecode(value);
+  return decoded ? parseBncrTarget(decoded) : undefined;
+}
+
+/** Only the exact decoded BNCR session segment is treated as transport hex. */
+function matchesBncrSessionHex(value: string | undefined, sessionKey: string | undefined): boolean {
+  if (!value || !sessionKey) return false;
+  const segment = sessionKey.split(":").pop()?.trim();
+  return Boolean(segment && value === segment && decodedBncrSessionTarget(sessionKey));
 }
 
 /** Standard BNCR targets have 4 segments; session scopes may have extra trailing fields. */
@@ -176,10 +190,22 @@ function metadataFields(metadata: Dict): {
 }
 
 function normalizeBackendLabel(channel: string, value: unknown): string | undefined {
-  const backend = clean(value);
+  let backend = clean(value);
   if (!backend || backend.toLowerCase() === channel.toLowerCase()) return undefined;
-  const prefix = channel.toLowerCase() + "/";
-  return backend.toLowerCase().startsWith(prefix) ? backend.slice(prefix.length) : backend;
+  for (const separator of ["/", ":"]) {
+    const prefix = channel.toLowerCase() + separator;
+    if (backend.toLowerCase().startsWith(prefix)) {
+      backend = backend.slice(prefix.length).trim();
+      break;
+    }
+  }
+  return backend && backend.toLowerCase() !== channel.toLowerCase() ? backend : undefined;
+}
+
+function isMultiAccountChannel(channel: string, config: PeoplePluginConfig): boolean {
+  return (config.multiAccountChannels ?? ["bncr"]).some(
+    (value) => value.trim().toLowerCase() === channel.toLowerCase(),
+  );
 }
 
 function channelIdentity(params: {
@@ -193,7 +219,7 @@ function channelIdentity(params: {
   if (platform && platform.includes("/")) return normalizePlatform(platform);
   return resolvePlatform({
     channel: params.channel,
-    backend: multi.some((value) => value.toLowerCase() === params.channel.toLowerCase()) ? params.backend : undefined,
+    backend: multi.some((value) => value.trim().toLowerCase() === params.channel.toLowerCase()) ? params.backend : undefined,
     backendChannels: multi,
     template: params.config.platformTemplate,
     overrides: params.config.platformOverrides,
@@ -217,23 +243,27 @@ function standardIdentity(params: {
   const metadataTarget = params.multi
     ? params.targets?.map(parseBncrTarget).find(Boolean)
     : undefined;
+  const sessionTarget = params.multi ? decodedBncrSessionTarget(params.sessionKey) : undefined;
   // Canonical metadata.to / originatingTo wins; a target-shaped native
   // conversation ID is the next standard field, ahead of any hex fallback.
   const target = metadataTarget ?? conversationTarget;
-  const backend = platform ?? target?.backend;
+  // When a standard target is available, its backend and chat id belong to
+  // the same host-normalized coordinate. A separate platform label may be
+  // older or less specific, so it must not be combined with that target.
+  const backend = target?.backend ?? platform;
   let chatId = params.multi
-    ? (isHexLike(conversation) ? undefined : conversation)
+    ? (matchesBncrSessionHex(conversation, params.sessionKey) ? undefined : conversation)
     : conversation;
-  if (params.multi && metadataTarget?.chatId && isBncrTargetChat(chatId)) {
+  if (params.multi && metadataTarget?.chatId) {
     chatId = metadataTarget.chatId;
   } else if (params.multi && conversationTarget?.chatId) {
     chatId = conversationTarget.chatId;
   } else if (params.multi && !chatId) {
     chatId = target?.chatId;
   }
-  const isGroup = params.isGroup ?? target?.isGroup;
+  let isGroup = params.isGroup ?? target?.isGroup;
   if (params.multi && !backend && params.sessionKey) {
-    const fallback = parseBncrTarget(hexDecode(params.sessionKey));
+    const fallback = sessionTarget;
     if (fallback?.backend) {
       return {
         backend: fallback.backend,
@@ -243,27 +273,22 @@ function standardIdentity(params: {
       };
     }
   }
+  let source: ResolvedIdentity["source"] = target?.backend ? "standard" : platform ? "explicit" : "standard";
+  // A standard backend with a missing chat id can still use the decoded
+  // session's transport target. Standard fields remain authoritative for the
+  // backend; only the absent chat coordinate comes from fallback.
+  if (params.multi && backend && !chatId && sessionTarget?.chatId) {
+    chatId = sessionTarget.chatId;
+    isGroup = isGroup ?? sessionTarget.isGroup;
+    source = "session_fallback";
+  }
   return {
     backend,
     chatId,
     isGroup,
-    source: platform ? "explicit" : "standard",
+    source,
     platform: backend ? `${params.channel}/${backend}` : undefined,
   };
-}
-
-function isHexLike(value: string | undefined): boolean {
-  return Boolean(value && /^[0-9a-f]+$/iu.test(value.split(":").pop() ?? ""));
-}
-
-/** Host-native conversation IDs may be prefixed chat targets, not real chat IDs. */
-function isBncrTargetChat(value: string | undefined): boolean {
-  if (!value) return true;
-  const lower = value.toLowerCase();
-  const stripped = ["channel:", "chat:", "user:", "group:"]
-    .find((prefix) => lower.startsWith(prefix));
-  const parts = (stripped ? value.slice(stripped.length) : value).split(":");
-  return parts.length >= 4 && parts[0]?.toLowerCase() === "bncr" && Boolean(parts[1]?.trim());
 }
 
 export function hookSenderName(ctx: HookCtx): string | undefined {
@@ -274,11 +299,15 @@ export function hookChatTitle(ctx: HookCtx): string | undefined {
   return firstString(record(ctx.channelContext?.chat), ["title", "name", "displayName", "display_name", "subject", "group_subject", "groupName"]);
 }
 
+export function hookChatId(ctx: HookCtx): string | undefined {
+  return clean(ctx.chatId) ?? firstString(record(ctx.channelContext?.chat), ["id", "chatId", "chat_id", "conversationId"]);
+}
+
 export function hookIsGroup(ctx: HookCtx): boolean {
   const chat = record(ctx.channelContext?.chat);
   if (chat.isGroup === true || chat.is_group_chat === true || chat.isGroupChat === true) return true;
   const type = firstString(chat, ["type", "kind", "chat_type", "chatType"]);
-  return type === "group" || type === "channel" || type === "supergroup";
+  return type?.toLowerCase() === "group" || type?.toLowerCase() === "channel" || type?.toLowerCase() === "supergroup";
 }
 
 export function inboundGroupTitle(event: InboundIdentityEvent): string | undefined {
@@ -295,7 +324,7 @@ export function resolveInboundIdentity(
   const fields = metadataFields(metadata);
   const channel = channelName(event.channel, event.channelId, context?.channelId, event.messageProvider);
   if (!channel) return undefined;
-  const multi = (config.multiAccountChannels ?? ["bncr"]).some((value) => value.toLowerCase() === channel.toLowerCase());
+  const multi = isMultiAccountChannel(channel, config);
   const resolved = standardIdentity({
     channel,
     multi,
@@ -318,13 +347,15 @@ export function resolveInboundIdentity(
       senderId: clean(event.senderId) ?? clean(context?.senderId) ?? fields.senderId,
       sessionKey: clean(event.sessionKey) ?? clean(context?.sessionKey),
       runId: clean(event.runId) ?? clean(context?.runId),
-      senderIsOwner: event.senderIsOwner,
       at: Date.now(),
     };
   }
   let chatId = resolved.chatId;
-  if (isHexLike(chatId)) {
-    chatId = clean(context?.parentConversationId) ?? (isHexLike(clean(context?.conversationId)) ? undefined : clean(context?.conversationId)) ?? chatId;
+  const sessionKey = clean(event.sessionKey) ?? clean(context?.sessionKey);
+  if (multi && matchesBncrSessionHex(chatId, sessionKey)) {
+    const parent = clean(context?.parentConversationId);
+    const conversation = clean(context?.conversationId);
+    chatId = parent ?? (matchesBncrSessionHex(conversation, sessionKey) ? undefined : conversation) ?? chatId;
   }
   return {
     channel,
@@ -340,7 +371,6 @@ export function resolveInboundIdentity(
     isGroup: resolved.isGroup,
     sessionKey: clean(event.sessionKey) ?? clean(context?.sessionKey),
     runId: clean(event.runId) ?? clean(context?.runId),
-    senderIsOwner: event.senderIsOwner,
     at: Date.now(),
   };
 }
@@ -356,18 +386,27 @@ export function resolveHookIdentity(
   const sender = record(ctx.channelContext?.sender);
   const channel = channelName(ctx.channel, ctx.channelId, ctx.messageProvider, inbound?.channel);
   if (!channel) return undefined;
-  const multi = (config.multiAccountChannels ?? ["bncr"]).some((value) => value.toLowerCase() === channel.toLowerCase());
+  const multi = isMultiAccountChannel(channel, config);
   const resolved = standardIdentity({
     channel,
     multi,
     platform: multi ? firstString(chat, ["platform", "provider"]) ?? firstString(sender, ["platform", "provider"]) : undefined,
     targets: [ctx.deliveryContext?.to].filter((value): value is string => Boolean(value)),
     sessionKey: sessionFallbackKey,
-    conversationId: clean(ctx.chatId) ?? firstString(chat, ["id", "chatId", "chat_id", "conversationId"]),
+    conversationId: hookChatId(ctx),
     isGroup: hookIsGroup(ctx) || undefined,
     config,
   });
-  const backend = multi ? inbound?.backend ?? resolved.backend : undefined;
+  // Standard or explicit fields from this turn outrank a cached inbound
+  // event. A session-hex result is only a transport fallback and must not
+  // replace a backend already established by a standard inbound field.
+  const preferResolvedStandard =
+    Boolean(resolved.backend) && resolved.source !== "session_fallback";
+  const backend = multi
+    ? preferResolvedStandard
+      ? resolved.backend
+      : inbound?.backend ?? resolved.backend
+    : undefined;
   if (multi && !backend) {
     return {
       channel,
@@ -381,12 +420,23 @@ export function resolveHookIdentity(
       at: Date.now(),
     };
   }
-  let chatId = inbound?.chatId ?? resolved.chatId ?? ctx.nativeChannelId;
-  if (isHexLike(chatId) && !isHexLike(inbound?.chatId)) chatId = resolved.chatId ?? chatId;
+  const resolvedChatIsTransportHex = multi && matchesBncrSessionHex(
+    resolved.chatId,
+    sessionFallbackKey ?? ctx.sessionKey,
+  );
+  let chatId = resolvedChatIsTransportHex
+    ? inbound?.chatId ?? resolved.chatId
+    : preferResolvedStandard
+      ? resolved.chatId ?? inbound?.chatId
+      : inbound?.chatId ?? resolved.chatId ?? ctx.nativeChannelId;
+  if (multi && matchesBncrSessionHex(chatId, sessionFallbackKey)) chatId = resolved.chatId ?? chatId;
+  const source = preferResolvedStandard
+    ? resolved.source
+    : inbound?.source ?? resolved.source;
   return {
     channel,
     backend,
-    source: inbound?.source === "deferred" ? resolved.source : inbound?.source ?? resolved.source,
+    source,
     platform: channelIdentity({ channel, backend, config }),
     workspaceKey,
     agentId: ctx.agentId,
@@ -394,7 +444,9 @@ export function resolveHookIdentity(
     senderName: hookSenderName(ctx) ?? inbound?.senderName,
     chatId,
     chatTitle: hookChatTitle(ctx) ?? inbound?.chatTitle,
-    isGroup: inbound?.isGroup ?? resolved.isGroup ?? hookIsGroup(ctx),
+    isGroup: preferResolvedStandard
+      ? resolved.isGroup ?? inbound?.isGroup
+      : inbound?.isGroup ?? resolved.isGroup ?? hookIsGroup(ctx),
     sessionKey: clean(ctx.sessionKey) ?? inbound?.sessionKey,
     runId: clean(ctx.runId) ?? inbound?.runId,
     at: Date.now(),
@@ -410,7 +462,7 @@ export function resolveToolIdentity(
 ): ResolvedIdentity | undefined {
   const channel = channelName(ctx.messageChannel, ctx.messageProvider, ctx.deliveryContext?.channel, inbound?.channel);
   if (!channel) return undefined;
-  const multi = (config.multiAccountChannels ?? ["bncr"]).some((value) => value.toLowerCase() === channel.toLowerCase());
+  const multi = isMultiAccountChannel(channel, config);
   const resolved = standardIdentity({
     channel,
     multi,
@@ -419,7 +471,13 @@ export function resolveToolIdentity(
     conversationId: ctx.nativeChannelId,
     config,
   });
-  const backend = multi ? inbound?.backend ?? resolved.backend : undefined;
+  const preferResolvedStandard =
+    Boolean(resolved.backend) && resolved.source !== "session_fallback";
+  const backend = multi
+    ? preferResolvedStandard
+      ? resolved.backend
+      : inbound?.backend ?? resolved.backend
+    : undefined;
   if (multi && !backend) {
     return {
       channel,
@@ -433,18 +491,28 @@ export function resolveToolIdentity(
       at: Date.now(),
     };
   }
-  let chatId = inbound?.chatId ?? resolved.chatId;
-  if (isHexLike(chatId) && !isHexLike(inbound?.chatId)) chatId = resolved.chatId ?? chatId;
+  const resolvedChatIsTransportHex = multi && matchesBncrSessionHex(resolved.chatId, ctx.sessionKey);
+  let chatId = resolvedChatIsTransportHex
+    ? inbound?.chatId ?? resolved.chatId
+    : preferResolvedStandard
+      ? resolved.chatId ?? inbound?.chatId
+      : inbound?.chatId ?? resolved.chatId;
+  if (multi && matchesBncrSessionHex(chatId, ctx.sessionKey)) chatId = resolved.chatId ?? chatId;
+  const source = preferResolvedStandard
+    ? resolved.source
+    : inbound?.source ?? resolved.source;
   return {
     channel,
     backend,
     platform: channelIdentity({ channel, backend, config }),
-    source: inbound?.source === "deferred" ? resolved.source : inbound?.source ?? resolved.source,
+    source,
     workspaceKey,
     agentId: ctx.agentId,
     senderId: clean(ctx.requesterSenderId) ?? inbound?.senderId,
     chatId,
-    isGroup: inbound?.isGroup ?? resolved.isGroup,
+    isGroup: preferResolvedStandard
+      ? resolved.isGroup ?? inbound?.isGroup
+      : inbound?.isGroup ?? resolved.isGroup,
     sessionKey: clean(ctx.sessionKey) ?? inbound?.sessionKey,
     runId: clean(ctx.runId) ?? inbound?.runId,
     at: Date.now(),

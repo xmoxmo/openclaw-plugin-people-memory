@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.0.8 — 身份、授权与维护加固（2026-11-10）
+
+- 新增账号级 `bot_hint=unknown|human|bot|mixed` 与 `bot_hint_source=history|group_evidence|manual`；它是根据历史行为作出的、可能误判的软提示，不影响身份、owner 授权、绑定、归并或回复硬门禁。`mixed` 表示人与 bot 可能共用账号。
+- 自动 bot 证据只填写 `unknown`，不覆盖人工 `human/bot/mixed`；owner 可新增 `people_bot_hint` 修正。旧 `current_role` 仅保留 owner 等兼容角色，不再承载 bot 判断。
+- schema 升到 v3，v1/v2 旧库自动新增 hint 列并迁移旧角色；账号归并时 `bot` 与 `human` 合成 `mixed`。`<people_context>` 对已知 hint 只增加一条标量参考行，`unknown` 不增加；画像卡和详情标注“仅供参考”。群观察表继续作为旧 JSON 兼容归档，不默认注入 prompt。
+- owner 授权只接受宿主本轮标准字段：工具执行上下文的 `senderIsOwner`，或 `before_tool_call` 的 `requester.senderIsOwner` 按精确 `toolCallId` 形成的一次性 receipt；删除 inbound claim 和跨轮缓存。
+- 非 owner 的群读写必须匹配完整频道身份空间和 chat ID；deferred、裸 BNCR、缺 chat ID 以及同群号跨后端碰撞均 fail closed，纯数字群号优先解析当前身份空间。
+- `<people_context>`、画像详情和全局搜索结果把昵称、备注、特征、印象、群标题与群事件作为不可信数据显示，移除控制字符、bidi / 零宽字符、伪造标签和跨行指令；画像压缩指令不再注入给 agent。
+- 正常使用行为保持不变：自动采集与上下文注入继续默认开启，普通 agent 可查自己、写当前群和查看基础状态，宿主本次标记 owner 的调用仍可查他人、看诊断和手动维护。
+- 身份缓存按 `workspace + session + run` 精确匹配；过期或跨 session 的 sender 不再回退成另一轮身份。
+- 身份缓存支持仅有 `runId` 的宿主调用，并把并行 run 隔离到各自工作区绑定；只有 session 与 run 都缺失时才使用 sender + chat 的唯一精确回退。
+- owner 孤儿成员修复只允许同平台或已配置 sender family 自动绑定；跨无关平台保持原状。
+- 删除账号时在同一事务清理群成员；SQLite 与 JSON 备份严格来自同一快照，备份文件权限固定为 `0600`，已有数据目录尽力收紧为 `0700`。
+- 修复账号/人物绑定双写不变量：检测 `accounts.bound_person_id` 与 `person_accounts` 的任一方向不一致，并在 repair 中双向收敛。
+- 账号与群归并保留缺失名称、群标题、bot 名和完整首次/最近时间范围；旧 JSON 导入保留 `confirmed_name`，并归一旧 BNCR 桥接账号别名。
+- 旧 JSON 账号画像的 `current_role` 作为富来源导入，并转换为 `bot_hint`；`owner` 不参与 bot 推断。缺少有效时间的旧 `scan-state` 不再清空数据库中已有的全量扫描进度。
+- 旧 BNCR 群成员 ID 按群后端归一；裸账号有绑定或画像时不会被 repair 静默删除，按人物名绑定只接受唯一精确匹配。
+- 语义压缩失败写入 service failure；旧快照不回退 `current_role`；空 agent entries 回退当前工作区；owner abort 后不进入 completion 回退。
+- 后台维护对每个工作区隔离 scheduled/completion 心跳写入和 lease-release 异常，一个工作区失败不会中断其他工作区；忙锁跳过不伪造完成。
+- hooks 与 runtime 统一解析宿主自定义 stateDir；维护摘要按解析后的时间值选择，不受时区偏移影响。
+- 裸 BNCR 行只在唯一后端可确定，或全部后端兄弟属于同一 sender family 且无人物/角色冲突时迁移；跨独立后端不再按最近活跃时间猜目标。
+- 周期备份识别 repair 与 compact 的实际变更面，包括没有 health warning 的同族归并、成员 owner 角色补标和系统成员清理，避免自动写入缺少回滚快照；既有账号仅补成员证据时也会留下修复动作。
+- 宿主 scheduler 的取消信号贯穿当前维护周期；停止或重载时不会继续执行下一个工作区、画像压缩或写入假的完成心跳，后台 service 在同对象 `start → stop → start` 后恢复运行态引用。
+- `people_cycle { run: true }` 现在消费宿主工具调用的取消信号；CLI `cycle` 同时把内部语义维护失败计为命令失败。
+- 画像压缩 completion 返回后重新读取 owner、活跃维度、原印象与当前特征；等待期间的删除、账号归并或特征更新会阻止旧快照回写，新印象与其他维度保持不动。
+- 隔离模型的画像压缩提示把原始印象和既有 traits 都显式标为不可信证据，内部模型不得执行其中的命令、授权声明或输出格式要求。
+- 身份缓存中的 session→workspace 绑定增加 10 分钟 TTL 和 500 项上限，未命中的 prompt session 不会无限增长。
+- 单次维护心跳 patch 改为同一 SQLite 事务，任一字段写入失败不会留下“已完成但摘要未写”等半套状态。
+- BNCR 明确以标准 metadata 投递目标中的后端与 chat 为一致身份；session hex 只在 chat 坐标缺失时回退，且必须精确匹配本轮 session 段，避免正常 hex 形态 chat ID 被误判。
+- 宿主省略 run/session 标识时，hooks 与工具只使用完整“工作区 + 频道 + sender + chat”精确关联；缺少 chat 仍 fail closed，不按 sender 单字段回退。
+- 显式 `multiAccountChannels: []` 可关闭多账号频道默认值；空 platform / sender 在 service 和数据库边界拒绝写入。
+- 数据库文件被删除或替换后，运行时关闭旧句柄、打开新文件并丢弃旧维护摘要；CLI `validate` / `health` / `cycle` 在检查失败时返回非零退出码。
+- 增加账号绑定双向一致性修复、账群归并元数据保留、旧 BNCR 成员 ID 归一、备份权限、事务回滚、调度取消和 completion 并发回归；全部测试通过。
+
 ## 0.0.7 — 发布包完整性修复（2026-11-09）
 
 - 发布仓同步补入新增的 `dist/src/plugin/{identity-store,legacy-cron,maintenance,service}.js`，修复 0.0.6 npm 包入口引用 `service.js` 但文件缺失的问题。
@@ -8,7 +42,7 @@
 ## 0.0.6 — 稳定身份、宿主 owner 授权与内部自维护（2026-11-09）
 
 - 稳定身份改为「频道身份空间 + 用户 / 群 ID」：普通频道用频道名整体，BNCR 用 `bncr/后端` 整体；宿主 `accountId` / `Primary` 不再参与身份。入站优先读宿主标准字段，BNCR 标准字段缺后端时才回退解析 sessionKey 的 hex 段。
-- owner 授权只认宿主本轮 `senderIsOwner=true`；inbound_claim 按「工作区 + sessionKey + senderId」单次绑定、消费即删。删除 `internalAdminAgents` 与「无发送者即内部管理员」的插件自造授权链。
+- owner 授权只认宿主本轮 `senderIsOwner=true`。当时曾用 inbound claim 按「工作区 + sessionKey + senderId」单次绑定、消费即删；Unreleased 已删除 claim 路径，只保留工具调用 `requester.senderIsOwner` 的一次性 receipt，并删除 `internalAdminAgents` 与「无发送者即内部管理员」的插件自造授权链。
 - 注册插件后台 `people-maintenance` service：按工作区用宿主 scheduler 定时执行确定性维护、内部隔离 completion 画像压缩、内部写回和计数摘要；`runtime.llm.complete` 与 `runtime.subagent.complete` 均支持，不做普通 agent 回退。
 - `people_cycle` 默认改为只读维护摘要；owner 可用 `run: true` 手动触发同一套插件内部逻辑。后台维护不再通过 agent 工具提权。
 - 清理现有 `people-cycle-home` / `people-cycle-public` 外部 cron；旧周期提示词标记为历史参考，不随新流程运行。

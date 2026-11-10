@@ -1,5 +1,8 @@
 import { nowIso } from "../core/time.js";
+import { safeContextValue } from "../core/service.js";
+import { SCHEMA_VERSION } from "../core/schema.js";
 import { authorizeWorkspace, canManage, groupMatchesCurrent, WRITE_TOOL_NAMES, writeToolsEnabled, } from "./authz.js";
+import { isAgentDisabled } from "./config.js";
 import { resolveToolIdentity } from "./identity.js";
 function stringArg(args, key) {
     const value = args[key];
@@ -16,12 +19,13 @@ function textResult(text) {
     return { content: [{ type: "text", text }], details: {} };
 }
 function rememberResult(label, result) {
+    const safeLabel = safeContextValue(label);
     if (result.traitUpdated && result.impressionStored)
-        return `已记录到 ${label}，并更新了特征维度。`;
+        return `已记录到 ${safeLabel}，并更新了特征维度。`;
     if (result.traitUpdated)
-        return `已更新 ${label} 的特征维度。`;
+        return `已更新 ${safeLabel} 的特征维度。`;
     if (result.impressionStored)
-        return `已记录到 ${label}。`;
+        return `已记录到 ${safeLabel}。`;
     return "这条内容已存在，未重复写入。";
 }
 function forgetResultText(result) {
@@ -37,38 +41,46 @@ function toolService(runtime, ctx) {
         agentDir: ctx.agentDir,
     });
 }
-/**
- * A status check is not a privileged action and must not spend the one-shot
- * owner claim. Other admitted owner tools consume it for exactly one execution.
- */
-function admitOwnerClaim(runtime, ctx, toolName) {
-    if (toolName === "people_status")
-        return ctx;
-    if (ctx.senderIsOwner === true)
-        return ctx;
-    const senderId = ctx.requesterSenderId?.trim();
-    if (!senderId || !ctx.sessionKey)
-        return ctx;
-    const service = toolService(runtime, ctx);
-    if (!runtime.identities.consumeOwnerClaim({
-        workspaceKey: service.paths.workspaceKey,
-        sessionKey: ctx.sessionKey,
-        senderId,
-    }))
-        return ctx;
-    return { ...ctx, senderIsOwner: true };
-}
 function ownerAuthorized(ctx) {
     return ctx.senderIsOwner === true;
 }
-function ownerRequired(ctx) {
-    if (!canManage(ctx))
-        throw new Error("仅宿主本轮标记为 owner 时可操作；内部维护由插件后台完成。");
-}
 function currentIdentity(ctx, runtime, service) {
     const workspaceKey = service.paths.workspaceKey;
-    const pending = runtime.identities.get(workspaceKey, ctx.sessionKey, ctx.runId, ctx.messageChannel ?? ctx.messageProvider, ctx.requesterSenderId);
+    const direct = resolveToolIdentity(ctx, runtime.config, undefined, workspaceKey);
+    const pending = runtime.identities.get(workspaceKey, ctx.sessionKey, ctx.runId, ctx.messageChannel ?? ctx.messageProvider, ctx.requesterSenderId, direct?.chatId ?? ctx.nativeChannelId);
     return resolveToolIdentity(ctx, runtime.config, pending, workspaceKey);
+}
+/** A complete current channel identity space and chat id, or nothing. */
+function currentGroupIdentity(ctx, runtime, service) {
+    const identity = currentIdentity(ctx, runtime, service);
+    if (!identity ||
+        identity.source === "deferred" ||
+        identity.isGroup !== true ||
+        !identity.platform.trim() ||
+        !identity.chatId?.trim() ||
+        (identity.platform.toLowerCase() === "bncr" && !identity.platform.includes("/")))
+        return undefined;
+    return identity;
+}
+/**
+ * A bare chat id means the current identity space's group. Exact keys stay
+ * available for owner lookup and for deliberately addressing another row.
+ */
+function resolveToolGroup(service, ref, identity) {
+    const value = ref.trim();
+    const bare = value && !value.includes("/") && !value.includes(":");
+    if (bare && identity) {
+        const current = service.db.findGroup(identity.platform, value);
+        if (current)
+            return current;
+    }
+    return service.resolveGroupStrict(value);
+}
+function requireToolGroup(service, ref, identity) {
+    const group = resolveToolGroup(service, ref, identity);
+    if (group)
+        return group;
+    return service.resolveGroupStrict(ref);
 }
 function currentAccount(ctx, runtime, service) {
     const senderId = ctx.requesterSenderId?.trim();
@@ -76,20 +88,61 @@ function currentAccount(ctx, runtime, service) {
         return null;
     const identity = currentIdentity(ctx, runtime, service);
     const multi = runtime.config.multiAccountChannels ?? ["bncr"];
-    if (!identity || (multi.includes(identity.channel.toLowerCase()) && identity.platform.split("/").length < 2))
+    const multiBackend = multi.some((channel) => channel.trim().toLowerCase() === identity?.channel.toLowerCase());
+    if (!identity || (multiBackend && identity.platform.split("/").length < 2))
         return null;
     return service.db.getAccountByPlatformSender(identity.platform, senderId);
 }
-function requireAccount(ctx, runtime, service) {
-    const account = currentAccount(ctx, runtime, service);
-    if (!account)
-        throw new Error("当前消息没有可识别的发送者，无法确定画像对象。");
-    return account;
+function accountMatchesRef(account, ref) {
+    const value = ref.trim();
+    return Boolean(value &&
+        (value === account.account_id ||
+            value === account.sender_id ||
+            value === account.display_name ||
+            value === account.confirmed_name ||
+            value === account.call_name ||
+            value === account.bound_person_id));
+}
+/** Non-owner account mutations resolve only the current host identity. */
+function resolveMutationAccount(service, ctx, runtime, ref, errors) {
+    const self = currentAccount(ctx, runtime, service);
+    if (!canManage(ctx)) {
+        if (!self)
+            throw new Error(errors.noSelf);
+        if (ref && !accountMatchesRef(self, ref))
+            throw new Error(errors.foreign);
+        return self;
+    }
+    const target = ref ? resolveAccountRef(service, ref) : self;
+    if (!target)
+        throw new Error(errors.noSelf);
+    return target;
+}
+/** Resolve group data only after the current group identity is established. */
+function resolveAccessibleGroup(service, ctx, runtime, ref, foreignMessage) {
+    if (canManage(ctx)) {
+        const identity = currentGroupIdentity(ctx, runtime, service);
+        if (ref)
+            return requireToolGroup(service, ref, identity);
+        const current = identity?.chatId ? service.db.findGroup(identity.platform, identity.chatId) : null;
+        if (!current)
+            throw new Error(foreignMessage);
+        return current;
+    }
+    const identity = currentGroupIdentity(ctx, runtime, service);
+    if (!identity?.chatId)
+        throw new Error(foreignMessage);
+    const current = service.db.findGroup(identity.platform, identity.chatId) ?? service.db.getGroup(ref);
+    if (!current || !groupMatchesCurrent(current, identity))
+        throw new Error(foreignMessage);
+    if (ref && ref !== current.group_id && ref !== current.chat_id)
+        throw new Error(foreignMessage);
+    return current;
 }
 function resolveAccountRef(service, ref) {
     const matches = service.searchAccounts(ref);
     if (matches.length === 0)
-        throw new Error(`没有找到账号：${ref}`);
+        throw new Error(`没有找到账号：${safeContextValue(ref, 160)}`);
     if (matches.length > 1) {
         const exact = matches.filter((account) => account.account_id === ref ||
             account.display_name === ref ||
@@ -99,7 +152,7 @@ function resolveAccountRef(service, ref) {
             return exact[0];
         throw new Error(`匹配到多个账号，请用 account_id 精确指定：${matches
             .slice(0, 5)
-            .map((account) => `${account.account_id}(${account.display_name ?? "?"})`)
+            .map((account) => `${safeContextValue(account.account_id, 160)}(${safeContextValue(account.display_name ?? "?")})`)
             .join(", ")}`);
     }
     return matches[0];
@@ -110,7 +163,7 @@ function formatStatus(service) {
     const maintenance = status.maintenance;
     return [
         "识人库状态",
-        `状态：${status.schemaVersion === 2 ? "正常" : "需检修"} · 写入工具：${status.security.writeTools ? "开" : "关"}`,
+        `状态：${status.schemaVersion === SCHEMA_VERSION ? "正常" : "需检修"} · 写入工具：${status.security.writeTools ? "开" : "关"}`,
         `采集：${status.capture.lastAt ? "有心跳" : "尚无心跳"}`,
         `后台维护：${maintenance.active ? "运行中" : "未运行"} · 最近完成：${maintenance.completedAt ?? "无"} · 最近失败：${maintenance.lastError ? "有" : "无"}`,
     ].join("\n");
@@ -125,7 +178,7 @@ function formatDetailedStatus(service) {
         `工作区：${status.workspaceDir}`,
         `数据目录：${status.dataDir}`,
         `数据库：${status.dbPath}（schema v${status.schemaVersion}）`,
-        `状态：${status.schemaVersion === 2 ? "正常" : "需检修"} · 写入工具：${status.security.writeTools ? "开" : "关"}`,
+        `状态：${status.schemaVersion === SCHEMA_VERSION ? "正常" : "需检修"} · 写入工具：${status.security.writeTools ? "开" : "关"}`,
         `采集：${status.capture.lastAt ? "有心跳" : "尚无心跳"} · 身份挂起 ${status.capture.deferredCount} 次`,
         `后台维护：${maintenance.active ? "运行中" : "未运行"} · 最近完成：${maintenance.completedAt ?? "无"} · 最近失败：${maintenance.lastError ? "有" : "无"}`,
         `账号 ${counts.accounts ?? 0} · 人物 ${counts.persons ?? 0} · 绑定 ${counts.person_accounts ?? 0} · 群 ${counts.groups ?? 0}`,
@@ -136,7 +189,7 @@ function formatDetailedStatus(service) {
         `采集心跳：${status.capture.lastAt ?? "无"} · 标准 ${status.capture.standardCount} · hex 回退 ${status.capture.sessionFallbackCount} · 挂起 ${status.capture.deferredCount}`,
         `维护启动：${maintenance.startedAt ?? "无"} · 间隔 ${maintenance.intervalMs ? Math.round(maintenance.intervalMs / 3_600_000) + "h" : "无"}`,
         `最近调度：${maintenance.scheduledAt ?? "无"} · 最近失败：${maintenance.lastError ?? "无"}`,
-        `授权链：owner 只认宿主本轮 senderIsOwner=true`,
+        `授权链：owner 只认宿主本次工具执行上下文的 senderIsOwner=true，或精确 toolCallId 的一次性 requester.senderIsOwner receipt`,
     ].join("\n");
 }
 function formatDetailedHealth(report) {
@@ -151,7 +204,7 @@ function formatDetailedHealth(report) {
         lines.push("没有发现需要处理的问题。");
     else {
         for (const issue of report.issues.slice(0, 50)) {
-            lines.push(`· [${issue.level}] ${issue.code}: ${issue.message}`);
+            lines.push(`· [${issue.level}] ${issue.code}: ${safeContextValue(issue.message, 300)}`);
         }
         if (report.issues.length > 50)
             lines.push(`… 另有 ${report.issues.length - 50} 条`);
@@ -169,7 +222,7 @@ function formatValidation(report) {
     }
     else {
         for (const issue of report.issues.slice(0, 40)) {
-            lines.push(`· [${issue.level}] ${issue.code}: ${issue.message}`);
+            lines.push(`· [${issue.level}] ${issue.code}: ${safeContextValue(issue.message, 300)}`);
         }
         if (report.issues.length > 40)
             lines.push(`… 另有 ${report.issues.length - 40} 条`);
@@ -191,18 +244,33 @@ export function registerTools(api, runtime) {
                 label: name,
                 description,
                 parameters: parameters,
-                execute: async (_toolCallId, rawArgs) => {
+                execute: async (toolCallId, rawArgs, signal) => {
                     const args = (rawArgs ?? {});
-                    if (WRITE_TOOL_NAMES.has(name) && !writeToolsEnabled(runtime.config)) {
-                        throw new Error("写入工具已关闭（writeTools=false）。需要记录时请先在插件配置中开启。");
+                    const callContext = {
+                        ...baseContext,
+                        // The host tool factory context is the current-turn authority. A
+                        // matching before_tool_call receipt is an equivalent host source
+                        // for harnesses that expose authority only through that hook.
+                        senderIsOwner: baseContext.senderIsOwner === true ||
+                            runtime.identities.consumeToolCallOwner(toolCallId),
+                    };
+                    try {
+                        if (isAgentDisabled(runtime.config, callContext.agentId)) {
+                            throw new Error("本 agent 已在 disabledAgents 中关闭识人体系。");
+                        }
+                        if (WRITE_TOOL_NAMES.has(name) && !writeToolsEnabled(runtime.config)) {
+                            throw new Error("写入工具已关闭（writeTools=false）。需要记录时请先在插件配置中开启。");
+                        }
+                        return (await handler(args, callContext, signal));
                     }
-                    const callContext = admitOwnerClaim(runtime, baseContext, name);
-                    return (await handler(args, callContext));
+                    finally {
+                        runtime.identities.discardToolCall(toolCallId);
+                    }
                 },
             };
         }), { name });
     };
-    register("people_status", "状态入口：查看当前工作区识人库是否正常运行。普通 agent 只收到去标识化状态，owner 可看详细状态。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_status", "状态入口：查看当前工作区识人库是否正常运行。普通 agent 只收到去标识化状态，owner 可看详细状态。", { type: "object", additionalProperties: false, properties: {} }, (args, ctx) => {
         authorizeWorkspace(stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx);
         return textResult(canManage(ctx) ? formatDetailedStatus(service) : formatStatus(service));
@@ -215,19 +283,14 @@ export function registerTools(api, runtime) {
             account: { type: "string", description: "账号 ID 或显示名，等价于 query。" },
             person: { type: "string", description: "人物 ID（p_ 开头）或人物名。" },
             group: { type: "string", description: "群 ID 或 chat_id；提供时查群记忆。" },
-            full: { type: "boolean", description: "返回完整 traits 和印象列表（含 ID），用于画像归并；普通展示用默认卡片。" },
+            full: { type: "boolean", description: "返回完整 traits 和印象列表（含 ID），用于 owner 诊断；常规画像压缩由插件后台完成。" },
         },
     }, (args, ctx) => {
         const service = toolService(runtime, ctx);
         const full = boolArg(args, "full") === true;
         const groupRef = stringArg(args, "group");
         if (groupRef) {
-            const group = service.resolveGroup(groupRef);
-            if (!group)
-                throw new Error(`没有找到群：${groupRef}。可以只传数字群号。`);
-            if (!canManage(ctx) && !groupMatchesCurrent(group, ctx.nativeChannelId)) {
-                throw new Error("只能查询当前群的群记忆。");
-            }
+            const group = resolveAccessibleGroup(service, ctx, runtime, groupRef, "只能查询当前群的群记忆。");
             return textResult(service.formatGroup(group));
         }
         const query = stringArg(args, "query");
@@ -260,7 +323,7 @@ export function registerTools(api, runtime) {
             if (!person) {
                 const matches = service.db.searchPersons(personRef, 5);
                 if (matches.length > 1) {
-                    throw new Error(`找到多个人物匹配「${personRef}」：${matches.map((item) => `${item.person_id}（${item.call_name || item.name || "未命名"}）`).join("、")}。请用 person_id。`);
+                    throw new Error(`找到多个人物匹配「${safeContextValue(personRef, 160)}」：${matches.map((item) => `${safeContextValue(item.person_id, 80)}（${safeContextValue(item.call_name || item.name || "未命名")}）`).join("、")}。请用 person_id。`);
                 }
                 person = matches[0];
             }
@@ -280,7 +343,7 @@ export function registerTools(api, runtime) {
                 return textResult(service.formatPersonLookup(matches[0].person_id, full));
             }
             if (matches.length > 1) {
-                throw new Error(`找到多个人物匹配「${accountRef}」：${matches.map((item) => `${item.person_id}（${item.call_name || item.name || "未命名"}）`).join("、")}。请用 person_id。`);
+                throw new Error(`找到多个人物匹配「${safeContextValue(accountRef, 160)}」：${matches.map((item) => `${safeContextValue(item.person_id, 80)}（${safeContextValue(item.call_name || item.name || "未命名")}）`).join("、")}。请用 person_id。`);
             }
             throw error;
         }
@@ -320,14 +383,11 @@ export function registerTools(api, runtime) {
             });
             return textResult(rememberResult(person.call_name || person.name || person.person_id, result));
         }
-        const self = currentAccount(ctx, runtime, service);
         const accountRef = stringArg(args, "account");
-        const target = accountRef ? resolveAccountRef(service, accountRef) : self;
-        if (!target)
-            throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (target.account_id !== self?.account_id && !canManage(ctx)) {
-            throw new Error("只能记录自己的信息。");
-        }
+        const target = resolveMutationAccount(service, ctx, runtime, accountRef, {
+            noSelf: "当前消息没有可识别的发送者。",
+            foreign: "只能记录自己的信息。",
+        });
         const modeRaw = stringArg(args, "mode");
         const result = service.remember({
             accountId: target.account_id,
@@ -350,14 +410,11 @@ export function registerTools(api, runtime) {
         },
     }, (args, ctx) => {
         const service = toolService(runtime, ctx);
-        const self = currentAccount(ctx, runtime, service);
         const accountRef = stringArg(args, "account");
-        const target = accountRef ? resolveAccountRef(service, accountRef) : self;
-        if (!target)
-            throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (target.account_id !== self?.account_id && !canManage(ctx)) {
-            throw new Error("只能设置自己的称呼。");
-        }
+        const target = resolveMutationAccount(service, ctx, runtime, accountRef, {
+            noSelf: "当前消息没有可识别的发送者。",
+            foreign: "只能设置自己的称呼。",
+        });
         if (stringArg(args, "person_name") && !ownerAuthorized(ctx)) {
             throw new Error("只有 owner 可以修改人物正式名字。");
         }
@@ -367,7 +424,7 @@ export function registerTools(api, runtime) {
             confirmedName: stringArg(args, "confirmed_name"),
             personName: stringArg(args, "person_name"),
         });
-        return textResult(`已更新${result.target === "person" ? "人物" : "账号"}称呼${result.callName ? `：${result.callName}` : "。"}`);
+        return textResult(`已更新${result.target === "person" ? "人物" : "账号"}称呼${result.callName ? `：${safeContextValue(result.callName)}` : "。"}`);
     });
     register("people_note", "向当前群或指定群追加一条群记忆。非 owner 只能写当前群。", {
         type: "object",
@@ -385,13 +442,7 @@ export function registerTools(api, runtime) {
         if (!summary)
             throw new Error("summary 不能为空。");
         const explicitGroup = stringArg(args, "group");
-        const groupRef = explicitGroup ?? ctx.nativeChannelId ?? "";
-        if (!groupRef)
-            throw new Error("当前会话没有群标识，请显式传 group。");
-        const group = service.resolveGroupStrict(groupRef);
-        if (explicitGroup && !canManage(ctx) && !groupMatchesCurrent(group, ctx.nativeChannelId)) {
-            throw new Error("只能向当前群写入群记忆。");
-        }
+        const group = resolveAccessibleGroup(service, ctx, runtime, explicitGroup ?? "", "只能向当前群写入群记忆。");
         const result = service.note({
             groupId: group.group_id,
             summary,
@@ -400,6 +451,35 @@ export function registerTools(api, runtime) {
             agentId: ctx.agentId,
         });
         return textResult(result.stored ? "已写入群记忆。" : "同一天已有相同记忆，未重复写入。");
+    });
+    register("people_bot_hint", "修正账号的历史行为推断（unknown/human/bot/mixed）。该值仅据历史得出，可能误判，不构成身份、回复门禁或授权。仅 owner 可用。", {
+        type: "object",
+        additionalProperties: false,
+        required: ["hint"],
+        properties: {
+            account: { type: "string", description: "账号 ID 或可唯一定位的显示名；省略表示当前发送者账号。" },
+            hint: {
+                type: "string",
+                enum: ["unknown", "human", "bot", "mixed"],
+                description: "mixed 表示观察证据显示同一账号可能由人与 bot 共用。",
+            },
+        },
+    }, (args, ctx) => {
+        if (!canManage(ctx))
+            throw new Error("修正历史行为推断仅限 owner。");
+        const service = toolService(runtime, ctx);
+        const hint = stringArg(args, "hint");
+        if (hint !== "unknown" && hint !== "human" && hint !== "bot" && hint !== "mixed") {
+            throw new Error("hint 必须是 unknown、human、bot 或 mixed。");
+        }
+        const accountRef = stringArg(args, "account");
+        const account = accountRef
+            ? resolveAccountRef(service, accountRef)
+            : currentAccount(ctx, runtime, service);
+        if (!account)
+            throw new Error("当前消息没有可识别的发送者；请用 account 指定目标账号。");
+        const updated = service.setAccountBotHint(account.account_id, hint);
+        return textResult(`已更新 ${safeContextValue(updated.account_id, 160)} 的历史行为推断为 ${updated.bot_hint}（仅供参考，可能误判；非身份或授权）。`);
     });
     register("people_bind", "把账号绑定到人物（仅 owner）。绑定后画像合并到人物级。", {
         type: "object",
@@ -422,7 +502,10 @@ export function registerTools(api, runtime) {
             name: stringArg(args, "name"),
             confidence: stringArg(args, "confidence"),
         });
-        return textResult(`已绑定 ${account.account_id} → ${result.personId}${result.createdPerson ? "（新建人物）" : ""}；迁移印象 ${result.moved.impressions} 条、特征 ${result.moved.traits} 个。`);
+        if (result.alreadyBound) {
+            return textResult(`账号 ${safeContextValue(account.account_id, 160)} 已绑定到人物 ${safeContextValue(result.personId, 80)}，未重复变更。`);
+        }
+        return textResult(`已绑定 ${safeContextValue(account.account_id, 160)} → ${safeContextValue(result.personId, 80)}${result.createdPerson ? "（新建人物）" : ""}；迁移印象 ${result.moved.impressions} 条、特征 ${result.moved.traits} 个${result.moved.traitsPreserved ? `、保留冲突特征 ${result.moved.traitsPreserved} 个` : ""}。`);
     });
     register("people_forget", "删除匹配到的印象或特征。默认只能操作自己；owner 可指定账号；purge 仅 owner 可用。", {
         type: "object",
@@ -435,7 +518,7 @@ export function registerTools(api, runtime) {
             scope: {
                 type: "string",
                 enum: ["all", "impressions", "traits"],
-                description: "删除范围，默认 all。画像归并后用 impressions，避免误删 traits。",
+                description: "删除范围，默认 all；需要只清理原始印象时显式用 impressions。",
             },
             purge: {
                 type: "boolean",
@@ -463,14 +546,11 @@ export function registerTools(api, runtime) {
             const result = service.forget({ personId: person.person_id, match, scope, purge });
             return textResult(forgetResultText(result));
         }
-        const self = currentAccount(ctx, runtime, service);
         const accountRef = stringArg(args, "account");
-        const target = accountRef ? resolveAccountRef(service, accountRef) : self;
-        if (!target)
-            throw new Error("当前消息没有可识别的发送者，请用 account 指定目标。");
-        if (!canManage(ctx) && target.account_id !== self?.account_id) {
-            throw new Error("只能删除自己的信息。");
-        }
+        const target = resolveMutationAccount(service, ctx, runtime, accountRef, {
+            noSelf: "当前消息没有可识别的发送者。",
+            foreign: "只能删除自己的信息。",
+        });
         const result = service.forget({ accountId: target.account_id, match, scope, purge });
         return textResult(forgetResultText(result));
     });
@@ -479,7 +559,6 @@ export function registerTools(api, runtime) {
         additionalProperties: false,
         properties: {
             fix: { type: "boolean" },
-            workspace: { type: "string" },
         },
     }, (args, ctx) => {
         authorizeWorkspace(stringArg(args, "workspace"), ctx.workspaceDir);
@@ -489,10 +568,15 @@ export function registerTools(api, runtime) {
         const fix = boolArg(args, "fix") === true;
         if (fix && !writeToolsEnabled(runtime.config))
             throw new Error("写入工具已关闭（writeTools=false），无法自动修复。");
-        const actions = fix ? service.repair() : [];
+        const repaired = fix ? service.repairWithBackup() : null;
+        const actions = repaired?.actions ?? [];
         const report = service.validate();
         const text = formatValidation(report);
-        return textResult(actions.length > 0 ? `${text}\n\n修复：${actions.join("；")}` : text);
+        const backupNote = repaired ? `\n\n修复前备份：${repaired.backup.dbBackup}` : "";
+        const repairNote = actions.length > 0
+            ? `\n\n修复：${actions.map((action) => safeContextValue(action, 500)).join("；")}`
+            : "";
+        return textResult(`${text}${backupNote}${repairNote}`);
     });
     register("people_scan_mark", "记录某个会话/频道的扫描进度；full=true 时同时更新全量扫描时间。仅 owner 可用。", {
         type: "object",
@@ -525,9 +609,9 @@ export function registerTools(api, runtime) {
         });
         if (boolArg(args, "full") === true)
             service.db.setScanMeta(lastScanAt);
-        return textResult(`已记录扫描进度：${channel} @ ${lastScanAt}`);
+        return textResult(`已记录扫描进度：${safeContextValue(channel, 160)} @ ${safeContextValue(lastScanAt, 80)}`);
     });
-    register("people_bootstrap", "初始化当前工作区的识人库，并导入旧 JSON（如果存在）。可重复执行。仅 owner 可用。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_bootstrap", "初始化当前工作区的识人库，并导入旧 JSON（如果存在）。可重复执行。仅 owner 可用。", { type: "object", additionalProperties: false, properties: {} }, (args, ctx) => {
         if (!canManage(ctx))
             throw new Error("初始化识人库仅限 owner。");
         authorizeWorkspace(stringArg(args, "workspace"), ctx.workspaceDir);
@@ -539,7 +623,6 @@ export function registerTools(api, runtime) {
         additionalProperties: false,
         properties: {
             keep: { type: "number", description: "保留最近多少份备份，默认 14，最少 2。" },
-            workspace: { type: "string", description: "目标工作区；默认当前工作区。" },
         },
     }, (args, ctx) => {
         if (!canManage(ctx))
@@ -555,7 +638,7 @@ export function registerTools(api, runtime) {
             `保留 ${report.kept} 份${report.removedOld ? `，清理旧文件 ${report.removedOld} 个` : ""}。`,
         ].join("\n"));
     });
-    register("people_health", "诊断入口：检查当前工作区识人库的完整性、备份和风险明细，仅 owner 可查看；普通状态请用 people_status。", { type: "object", additionalProperties: false, properties: { workspace: { type: "string" } } }, (args, ctx) => {
+    register("people_health", "诊断入口：检查当前工作区识人库的完整性、备份和风险明细，仅 owner 可查看；普通状态请用 people_status。", { type: "object", additionalProperties: false, properties: {} }, (args, ctx) => {
         authorizeWorkspace(stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx);
         if (!canManage(ctx))
@@ -566,24 +649,32 @@ export function registerTools(api, runtime) {
         type: "object",
         additionalProperties: false,
         properties: {
-            workspace: { type: "string" },
             run: { type: "boolean", description: "仅 owner 可用；手动触发一次插件内部维护，默认只读摘要。" },
             backup_keep: { type: "number" },
             backup_interval_hours: { type: "number" },
             force_backup: { type: "boolean" },
         },
-    }, async (args, ctx) => {
+    }, async (args, ctx, signal) => {
         authorizeWorkspace(stringArg(args, "workspace"), ctx.workspaceDir);
         const service = toolService(runtime, ctx);
         if (!canManage(ctx))
             throw new Error("诊断信息仅 owner 可查看；查看运行状态请用 people_status。");
         let report = runtime.maintenanceSummary({ workspaceDir: service.paths.workspaceDir, agentId: ctx.agentId });
         if (boolArg(args, "run") === true) {
-            await runtime.runMaintenanceCycle({ workspaceDir: service.paths.workspaceDir, agentId: ctx.agentId }, {
+            if (!writeToolsEnabled(runtime.config)) {
+                throw new Error("写入工具已关闭（writeTools=false），无法手动触发维护；只读摘要仍可查看。");
+            }
+            const cycle = await runtime.runMaintenanceCycle({ workspaceDir: service.paths.workspaceDir, agentId: ctx.agentId }, {
                 backupKeep: typeof args.backup_keep === "number" ? args.backup_keep : 14,
                 backupIntervalHours: typeof args.backup_interval_hours === "number" ? args.backup_interval_hours : 20,
                 forceBackup: boolArg(args, "force_backup") === true,
-            });
+            }, signal);
+            if (!cycle) {
+                if (signal?.aborted) {
+                    throw signal.reason instanceof Error ? signal.reason : new Error("people_cycle cancelled");
+                }
+                return textResult("本工作区已有维护轮次在执行，本次手动触发已跳过；请稍后用默认只读模式查看摘要。");
+            }
             report = runtime.maintenanceSummary({ workspaceDir: service.paths.workspaceDir, agentId: ctx.agentId });
         }
         if (!report) {
@@ -618,29 +709,29 @@ export function registerTools(api, runtime) {
             throw new Error("搜索全局记忆仅限 owner。");
         const service = toolService(runtime, ctx);
         const report = service.search(stringArg(args, "query") ?? "", typeof args.limit === "number" ? args.limit : 10);
-        const lines = [`搜索：${stringArg(args, "query")}`];
+        const lines = [`搜索：${safeContextValue(stringArg(args, "query"), 160)}`];
         if (report.accounts.length) {
             lines.push("", "账号");
             for (const account of report.accounts) {
-                lines.push(`· ${account.account_id}（${account.call_name || account.confirmed_name || account.display_name || "未命名"}）`);
+                lines.push(`· ${safeContextValue(account.account_id, 160)}（${safeContextValue(account.call_name || account.confirmed_name || account.display_name || "未命名")}）`);
             }
         }
         if (report.persons.length) {
             lines.push("", "人物");
             for (const person of report.persons) {
-                lines.push(`· ${person.person_id}（${person.call_name || person.name || "未命名"}）`);
+                lines.push(`· ${safeContextValue(person.person_id, 80)}（${safeContextValue(person.call_name || person.name || "未命名")}）`);
             }
         }
         if (report.impressions.length) {
             lines.push("", "印象");
             for (const impression of report.impressions) {
-                lines.push(`· ${impression.owner_id}：${impression.content}`);
+                lines.push(`· ${safeContextValue(impression.owner_id, 120)}：${safeContextValue(impression.content)}`);
             }
         }
         if (report.groupEvents.length) {
             lines.push("", "群事件");
             for (const event of report.groupEvents) {
-                lines.push(`· ${event.group_id} ${event.occurred_at.slice(0, 10)}：${event.summary}`);
+                lines.push(`· ${safeContextValue(event.group_id, 160)} ${safeContextValue(event.occurred_at.slice(0, 10), 12)}：${safeContextValue(event.summary)}`);
             }
         }
         if (lines.length === 1)
@@ -662,7 +753,7 @@ export function registerTools(api, runtime) {
         if (action === "list") {
             return textResult(service.db
                 .listDimensions()
-                .map((dimension) => `${dimension.key} · ${dimension.label} · ${dimension.active ? "启用" : "停用"} · sort=${dimension.sort}`)
+                .map((dimension) => `${safeContextValue(dimension.key, 48)} · ${safeContextValue(dimension.label, 80)} · ${dimension.active ? "启用" : "停用"} · sort=${dimension.sort}`)
                 .join("\n"));
         }
         if (!canManage(ctx))
@@ -675,7 +766,7 @@ export function registerTools(api, runtime) {
         const existing = service.db.getDimension(key);
         const active = action !== "disable";
         const dimension = service.upsertDimension(key, stringArg(args, "label") ?? existing?.label ?? key, active, typeof args.sort === "number" ? args.sort : existing?.sort ?? 999);
-        return textResult(`已更新维度 ${dimension.key}：${dimension.label}，${dimension.active ? "启用" : "停用"}。`);
+        return textResult(`已更新维度 ${safeContextValue(dimension.key, 48)}：${safeContextValue(dimension.label, 80)}，${dimension.active ? "启用" : "停用"}。`);
     });
     register("people_merge", "合并两个人物记录到一个目标人物。用于清理重复人物；需要 confirm=true。仅 owner 可用。", {
         type: "object",
@@ -697,7 +788,7 @@ export function registerTools(api, runtime) {
         if (!source || !target)
             throw new Error("source 和 target 不能为空。");
         const result = service.mergePersons(source, target);
-        return textResult(`已合并 ${source} → ${target}：迁移账号 ${result.accounts}、印象 ${result.impressions}、特征 ${result.traits}。`);
+        return textResult(`已合并 ${safeContextValue(source, 80)} → ${safeContextValue(target, 80)}：迁移账号 ${result.accounts}、印象 ${result.impressions}、特征 ${result.traits}。`);
     });
     register("people_unbind", "解除账号与人物绑定，默认把人物画像复制回账号，避免解绑即丢画像。需要 confirm=true。仅 owner 可用。", {
         type: "object",
@@ -716,7 +807,7 @@ export function registerTools(api, runtime) {
         const service = toolService(runtime, ctx);
         const account = resolveAccountRef(service, stringArg(args, "account") ?? "");
         const result = service.unbind(account.account_id, boolArg(args, "copy_profile") !== false);
-        return textResult(`已解除 ${account.account_id} 的人物绑定；复制印象 ${result.impressionsCopied} 条、特征 ${result.traitsCopied} 个。`);
+        return textResult(`已解除 ${safeContextValue(account.account_id, 160)} 的人物绑定；复制印象 ${result.impressionsCopied} 条、特征 ${result.traitsCopied} 个。`);
     });
     register("people_merge_account", "把同一人物的平台双份账号归并到一个账号（例如 bncr:x 并入 bncr/tgBot:x）。迁移印象/特征/群成员，必要时迁移人物绑定。需要 confirm=true。仅 owner 可用。", {
         type: "object",
@@ -736,7 +827,7 @@ export function registerTools(api, runtime) {
         const source = resolveAccountRef(service, stringArg(args, "source") ?? "");
         const target = resolveAccountRef(service, stringArg(args, "target") ?? "");
         const result = service.mergeAccounts(source.account_id, target.account_id);
-        return textResult(`已归并 ${source.account_id} → ${target.account_id}：印象 ${result.impressions}、特征 ${result.traits}、群成员 ${result.groupMembers}${result.bindingMoved ? "，并迁移了人物绑定" : ""}。`);
+        return textResult(`已归并 ${safeContextValue(source.account_id, 160)} → ${safeContextValue(target.account_id, 160)}：印象 ${result.impressions}、特征 ${result.traits}、群成员 ${result.groupMembers}${result.bindingMoved ? "，并迁移了人物绑定" : ""}。`);
     });
 }
 export { textResult, currentIdentity };

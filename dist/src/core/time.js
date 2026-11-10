@@ -25,3 +25,12 @@ export function isOlderThan(value, milliseconds) {
         return true;
     return Date.now() - parsed > milliseconds;
 }
+/** Compare display timestamps by instant, with deterministic text fallback for legacy junk. */
+export function compareTimestampsDescending(left, right) {
+    const leftMs = Date.parse(left);
+    const rightMs = Date.parse(right);
+    if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+        return rightMs - leftMs;
+    }
+    return right.localeCompare(left);
+}

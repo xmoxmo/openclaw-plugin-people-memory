@@ -1,19 +1,45 @@
-import { resolveStorePaths, resolveWorkspaceRoot } from "../core/paths.js";
+import { resolveWorkspaceRoot } from "../core/paths.js";
 import { isAgentDisabled } from "./config.js";
-import { resolveHookIdentity, resolveInboundIdentity, } from "./identity.js";
+import { PEOPLE_TOOL_NAMES, isPeopleToolName } from "./tool-names.js";
+import { hookChatId, resolveHookIdentity, resolveInboundIdentity, } from "./identity.js";
 const CAPTURE_INTERVAL_MS = 30_000;
 const DEFERRED_INTERVAL_MS = 5 * 60_000;
+const THROTTLE_MAX_ENTRIES = 500;
+/** Bound long-lived throttle state while preserving each active interval. */
+function takeThrottleSlot(store, key, now, intervalMs) {
+    const previous = store.get(key) ?? 0;
+    if (now - previous < intervalMs)
+        return false;
+    store.set(key, now);
+    if (store.size <= THROTTLE_MAX_ENTRIES)
+        return true;
+    for (const [entry, at] of store) {
+        if (now - at >= intervalMs * 2)
+            store.delete(entry);
+    }
+    if (store.size > THROTTLE_MAX_ENTRIES) {
+        const oldest = [...store.entries()].sort((left, right) => left[1] - right[1]);
+        for (const [entry] of oldest.slice(0, store.size - THROTTLE_MAX_ENTRIES))
+            store.delete(entry);
+    }
+    return true;
+}
 export function registerHooks(api, runtime, identities = runtime.identities) {
     const lastCapture = new Map();
     const lastDeferred = new Map();
     const logger = runtime.api.logger;
+    const toolMatcher = PEOPLE_TOOL_NAMES;
     const observe = (event, context) => {
+        if (isAgentDisabled(runtime.config, context?.agentId ?? event.agentId))
+            return;
         const workspaceDir = context?.workspaceDir?.trim() ||
             resolveWorkspaceRoot(runtime.api.config, context?.agentId ?? event.agentId);
         const workspaceKey = workspaceDir
-            ? resolveStorePaths({ workspaceDir, config: runtime.config }).workspaceKey
+            ? runtime.resolveWorkspacePaths({ workspaceDir, agentId: context?.agentId ?? event.agentId }, workspaceDir).workspaceKey
             : undefined;
-        const identity = resolveInboundIdentity(event, runtime.config, context, workspaceKey);
+        // Inbound owner metadata is never cached. Tool authority comes only from
+        // the host's current tool execution context or exact before_tool_call receipt.
+        const identity = resolveInboundIdentity({ ...event, senderIsOwner: undefined }, runtime.config, context, workspaceKey);
         if (identity)
             identities.put(identity);
     };
@@ -21,28 +47,43 @@ export function registerHooks(api, runtime, identities = runtime.identities) {
         try {
             observe(event, context);
         }
-        catch { /* passive observer only */ }
+        catch {
+            logger.warn("[people] inbound_claim observation failed");
+        }
         return undefined;
     }));
     api.on("message_received", ((event, context) => {
-        // This host event does not carry senderIsOwner. Only inbound_claim may
-        // bind a tool-side owner claim; observing here must never revive one.
+        // Message observation never grants owner authority. The tool execution
+        // context and exact before_tool_call receipt carry the host-owned bit.
         try {
-            observe({ ...event, senderIsOwner: undefined }, context);
+            observe(event, context);
         }
-        catch { /* passive observer only */ }
+        catch {
+            logger.warn("[people] message_received observation failed");
+        }
         return undefined;
     }));
-    api.on("before_prompt_build", ((event, ctx) => {
+    api.on("before_tool_call", ((event, ctx) => {
+        const name = event.toolName ?? ctx.toolName;
+        if (!isPeopleToolName(name))
+            return undefined;
+        identities.admitToolCallOwner(event.toolCallId ?? ctx.toolCallId, event.senderIsOwner ?? ctx.requester?.senderIsOwner);
+        return undefined;
+    }), { matcher: toolMatcher });
+    api.on("after_tool_call", ((event, ctx) => {
+        const name = event.toolName ?? ctx.toolName;
+        if (isPeopleToolName(name))
+            identities.discardToolCall(event.toolCallId ?? ctx.toolCallId);
+    }), { matcher: toolMatcher });
+    api.on("before_prompt_build", ((_event, ctx) => {
         try {
             if (isAgentDisabled(runtime.config, ctx.agentId))
                 return undefined;
             const service = runtime.get({ workspaceDir: ctx.workspaceDir, agentId: ctx.agentId });
             const workspaceKey = service.paths.workspaceKey;
-            if (ctx.sessionKey)
-                identities.registerWorkspace(ctx.sessionKey, workspaceKey);
+            identities.registerWorkspace(ctx.sessionKey, workspaceKey, ctx.runId);
             const hasInboundBackend = identities.hasBackend(workspaceKey, ctx.sessionKey, ctx.runId);
-            const pending = identities.get(workspaceKey, ctx.sessionKey, ctx.runId, ctx.channel ?? ctx.messageProvider, ctx.senderId);
+            const pending = identities.get(workspaceKey, ctx.sessionKey, ctx.runId, ctx.channel ?? ctx.messageProvider, ctx.senderId, hookChatId(ctx));
             const identity = resolveHookIdentity(ctx, runtime.config, pending, workspaceKey, hasInboundBackend ? undefined : ctx.sessionKey);
             const senderId = identity?.senderId?.trim();
             if (!identity || !senderId)
@@ -50,9 +91,8 @@ export function registerHooks(api, runtime, identities = runtime.identities) {
             const now = Date.now();
             if (identity.source === "deferred") {
                 const key = workspaceKey + "|" + ctx.sessionKey + "|" + senderId;
-                const previous = lastDeferred.get(key) ?? 0;
-                if (runtime.config.capture !== false && now - previous >= DEFERRED_INTERVAL_MS) {
-                    lastDeferred.set(key, now);
+                if (runtime.config.capture !== false &&
+                    takeThrottleSlot(lastDeferred, key, now, DEFERRED_INTERVAL_MS)) {
                     service.capture({
                         platform: identity.platform,
                         senderId,
@@ -69,10 +109,17 @@ export function registerHooks(api, runtime, identities = runtime.identities) {
             const chatId = identity.chatId;
             let groupId;
             if (runtime.config.capture !== false) {
-                const captureKey = workspaceKey + "|" + platform + "|" + senderId;
-                const previous = lastCapture.get(captureKey) ?? 0;
-                if (now - previous >= CAPTURE_INTERVAL_MS) {
-                    lastCapture.set(captureKey, now);
+                // The same sender can trigger replies in different groups in quick
+                // succession. Account refresh is idempotent; grouping the throttle
+                // by chat prevents the second group and its membership from vanishing.
+                const captureKey = [
+                    workspaceKey,
+                    platform,
+                    senderId,
+                    identity.isGroup === true ? "group" : "direct",
+                    chatId?.trim() || "none",
+                ].join("|");
+                if (takeThrottleSlot(lastCapture, captureKey, now, CAPTURE_INTERVAL_MS)) {
                     const result = service.capture({
                         platform,
                         senderId,
@@ -88,8 +135,9 @@ export function registerHooks(api, runtime, identities = runtime.identities) {
             }
             if (runtime.config.injectContext === false)
                 return undefined;
-            if (!groupId && chatId)
+            if (identity.isGroup === true && !groupId && chatId) {
                 groupId = service.db.findGroup(platform, chatId)?.group_id;
+            }
             const accountId = service.db.getAccountByPlatformSender(platform, senderId)?.account_id;
             if (!accountId)
                 return undefined;
@@ -106,7 +154,9 @@ export function registerHooks(api, runtime, identities = runtime.identities) {
             return { prependContext: card };
         }
         catch (error) {
-            logger.warn("[people] before_prompt_build failed: " + error.message);
+            logger.warn(runtime.config.debug
+                ? "[people] before_prompt_build failed: " + error.message
+                : "[people] before_prompt_build failed");
             return undefined;
         }
     }), { timeoutMs: 3000 });

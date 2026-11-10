@@ -25,6 +25,9 @@ export type ResolvedStorePaths = {
   workspaceKey: string;
 };
 
+export type BotHint = "unknown" | "human" | "bot" | "mixed";
+export type BotHintSource = "history" | "group_evidence" | "manual";
+
 export type AccountRecord = {
   account_id: string;
   platform: string;
@@ -33,6 +36,8 @@ export type AccountRecord = {
   confirmed_name: string | null;
   call_name: string | null;
   current_role: string | null;
+  bot_hint: BotHint;
+  bot_hint_source: BotHintSource | null;
   first_seen: string;
   last_interaction: string;
   updated_at: string;

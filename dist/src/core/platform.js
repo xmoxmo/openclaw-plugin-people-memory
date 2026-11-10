@@ -5,7 +5,13 @@ function clean(value) {
     return trimmed ? trimmed : undefined;
 }
 export function normalizePlatform(value) {
-    return value.trim().replace(/\s+/g, "").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
+    const normalized = value
+        .trim()
+        .replace(/\s+/g, "")
+        .replace(/\/{2,}/g, "/")
+        .replace(/^\/+|\/+$/g, "");
+    const legacy = /^([^/:]+):([^/]+)$/u.exec(normalized);
+    return legacy ? `${legacy[1]}/${legacy[2]}` : normalized;
 }
 /** Stable comparison key: `bncr/tgBot` and `bncr:tgBot` compare equal. */
 export function platformLookupKey(value) {
@@ -21,13 +27,26 @@ export function resolvePlatform(params) {
     const metadataPlatform = clean(params.metadataPlatform);
     const channel = clean(params.provider) ?? clean(params.channel);
     const backend = clean(params.backend);
-    if (metadataPlatform && (!channel || metadataPlatform.toLowerCase().startsWith(channel.toLowerCase()))) {
-        return normalizePlatform(metadataPlatform);
+    const metadataChannel = metadataPlatform?.split(/[:/]/u, 1)[0]?.trim();
+    if (metadataPlatform &&
+        (!channel || metadataChannel?.toLowerCase() === channel.toLowerCase())) {
+        const normalized = normalizePlatform(metadataPlatform);
+        const separator = normalized.indexOf(":");
+        if (separator > 0) {
+            const metadataChannel = normalized.slice(0, separator);
+            const metadataBackend = normalized.slice(separator + 1);
+            const backendChannels = params.backendChannels ?? ["bncr"];
+            if (metadataBackend &&
+                backendChannels.some((item) => item.trim().toLowerCase() === metadataChannel.toLowerCase())) {
+                return normalizePlatform(`${metadataChannel}/${metadataBackend}`);
+            }
+        }
+        return normalized;
     }
     if (!channel)
         return normalizePlatform(metadataPlatform ?? "unknown");
     const backendChannels = params.backendChannels ?? ["bncr"];
-    if (backend && backendChannels.some((item) => item.toLowerCase() === channel.toLowerCase())) {
+    if (backend && backendChannels.some((item) => item.trim().toLowerCase() === channel.toLowerCase())) {
         return normalizePlatform(`${channel}/${backend}`);
     }
     const overrideKey = Object.keys(params.overrides ?? {}).find((key) => key.toLowerCase() === channel.toLowerCase());

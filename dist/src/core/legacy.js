@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { parsePlatformFolder } from "./platform.js";
+import { botHintFromLegacyRole } from "./db.js";
+import { groupKey, parsePlatformFolder } from "./platform.js";
 import { nowIso } from "./time.js";
 function isObject(value) {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -227,6 +228,19 @@ export function importLegacyJson(db, options = {}) {
                 });
             }
         }
+        const accountAliases = new Map();
+        const aliasKey = (value) => value.trim().toLowerCase();
+        const rememberAccountAlias = (accountId) => {
+            accountAliases.set(aliasKey(accountId), accountId);
+            const separator = accountId.indexOf(":");
+            if (separator <= 0)
+                return;
+            const platform = accountId.slice(0, separator);
+            const senderId = accountId.slice(separator + 1);
+            if (platform.includes("/")) {
+                accountAliases.set(aliasKey(`${platform.replace(/\//gu, ":")}:${senderId}`), accountId);
+            }
+        };
         // Accounts: index entries first, then profile files (profiles carry richer data).
         for (const [, raw] of Object.entries(accountsIndex)) {
             if (!isObject(raw))
@@ -245,10 +259,14 @@ export function importLegacyJson(db, options = {}) {
             });
             if (result.created)
                 report.accounts += 1;
+            rememberAccountAlias(result.account.account_id);
             if (text(raw.confirmed_name))
                 db.setConfirmedName(result.account.account_id, text(raw.confirmed_name));
             if (text(raw.call_name))
                 db.setCallName(result.account.account_id, text(raw.call_name));
+            const legacyHint = botHintFromLegacyRole(text(raw.current_role));
+            if (legacyHint !== "unknown")
+                db.setAccountBotHint(result.account.account_id, legacyHint, "history");
         }
         for (const profile of accountProfiles) {
             const { raw } = profile;
@@ -262,9 +280,22 @@ export function importLegacyJson(db, options = {}) {
                 displayName: text(raw.display_name),
                 firstSeen: text(raw.first_seen) ?? undefined,
                 lastInteraction: text(raw.last_interaction) ?? undefined,
+                currentRole: text(raw.current_role),
             });
             if (account.created)
                 report.accounts += 1;
+            rememberAccountAlias(account.account.account_id);
+            // Profile files are the richer legacy account source. Apply their role
+            // explicitly because an old last_seen can make the upsert snapshot stale
+            // against an index row whose timestamp was synthesized at import time.
+            const currentRole = text(raw.current_role);
+            if (currentRole)
+                db.setAccountRole(account.account.account_id, currentRole);
+            const legacyHint = botHintFromLegacyRole(currentRole);
+            if (legacyHint !== "unknown")
+                db.setAccountBotHint(account.account.account_id, legacyHint, "history");
+            if (text(raw.confirmed_name))
+                db.setConfirmedName(account.account.account_id, text(raw.confirmed_name));
             if (text(raw.call_name))
                 db.setCallName(account.account.account_id, text(raw.call_name));
             const traits = isObject(raw.traits) ? raw.traits : {};
@@ -298,6 +329,21 @@ export function importLegacyJson(db, options = {}) {
                 requestedBindings.set(`${platform}:${senderId}`, { personId, method: "manual", confidence: "confirmed" });
             }
         }
+        for (const profile of accountProfiles) {
+            const personId = text(profile.raw.bound_person_id);
+            if (!personId)
+                continue;
+            const platform = text(profile.raw.platform) ?? profile.platform;
+            const senderId = text(profile.raw.sender_id) ?? profile.senderId;
+            const account = db.getAccountByPlatformSender(platform, senderId);
+            if (account) {
+                requestedBindings.set(account.account_id, {
+                    personId,
+                    method: "manual",
+                    confidence: "confirmed",
+                });
+            }
+        }
         for (const [accountId, raw] of Object.entries(bindingsIndex)) {
             if (!isObject(raw))
                 continue;
@@ -310,13 +356,17 @@ export function importLegacyJson(db, options = {}) {
                 confidence: text(raw.confidence) ?? "confirmed",
             });
         }
-        for (const [accountId, binding] of requestedBindings) {
+        for (const [requestedAccountId, binding] of requestedBindings) {
+            const requestedKey = aliasKey(requestedAccountId);
+            let accountId = accountAliases.get(requestedKey) ?? db.getAccount(requestedAccountId)?.account_id ?? requestedAccountId;
             if (!db.getAccount(accountId)) {
-                const separator = accountId.indexOf(":");
+                const separator = requestedAccountId.indexOf(":");
                 if (separator > 0) {
-                    const platform = accountId.slice(0, separator);
-                    const senderId = accountId.slice(separator + 1);
-                    db.upsertAccount({ platform, senderId, displayName: senderId });
+                    const platform = requestedAccountId.slice(0, separator);
+                    const senderId = requestedAccountId.slice(separator + 1);
+                    const created = db.upsertAccount({ platform, senderId, displayName: senderId });
+                    accountId = created.account.account_id;
+                    rememberAccountAlias(accountId);
                     report.accounts += 1;
                 }
             }
@@ -327,7 +377,7 @@ export function importLegacyJson(db, options = {}) {
                 report.bindings += 1;
             }
             else {
-                report.warnings.push(`绑定引用了不存在的账号: ${accountId}`);
+                report.warnings.push(`绑定引用了不存在的账号: ${requestedAccountId}`);
             }
         }
         // Groups: index first, then richer group files.
@@ -336,8 +386,9 @@ export function importLegacyJson(db, options = {}) {
                 continue;
             const platform = text(raw.platform) ?? "unknown";
             const chatId = text(raw.group_id) ?? extractChatId(groupId, platform);
+            const canonicalGroupId = groupKey(platform, chatId);
             const result = db.upsertGroup({
-                groupId,
+                groupId: canonicalGroupId,
                 platform,
                 chatId,
                 displayName: text(raw.displayName) ?? text(raw.display_name),
@@ -355,7 +406,7 @@ export function importLegacyJson(db, options = {}) {
                 report.warnings.push("群文件缺少 group_id/chat_id");
                 continue;
             }
-            const groupId = rawGroupId && rawGroupId.includes(":") ? rawGroupId : `${platform.replace(/\//g, ":")}:${chatId}`;
+            const groupId = groupKey(platform, chatId);
             const result = db.upsertGroup({
                 groupId,
                 platform,
@@ -379,6 +430,7 @@ export function importLegacyJson(db, options = {}) {
                     classification: text(memberRaw.classification) ?? "pending",
                     confidence: text(memberRaw.confidence) ?? "tentative",
                     roleInGroup: text(memberRaw.role_in_group) ?? text(memberRaw.role),
+                    firstSeen: text(memberRaw.first_seen) ?? text(memberRaw.firstSeen) ?? undefined,
                     at: text(memberRaw.last_seen) ?? text(memberRaw.lastSeen) ?? undefined,
                 });
                 report.groupMembers += 1;
@@ -454,7 +506,9 @@ export function importLegacyJson(db, options = {}) {
                 });
                 report.scanChannels += 1;
             }
-            db.setScanMeta(text(scanState.lastScanAt) ?? text(scanState.lastFullScanAt));
+            const lastFullScanAt = text(scanState.lastScanAt) ?? text(scanState.lastFullScanAt);
+            if (lastFullScanAt)
+                db.setScanMeta(lastFullScanAt);
         }
         db.metaSet("legacy_imported_at", nowIso());
         db.metaSet("legacy_source", dataDir);

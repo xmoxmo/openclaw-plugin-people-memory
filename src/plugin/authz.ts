@@ -1,49 +1,11 @@
 import type { PeoplePluginConfig } from "../core/types.js";
+import { platformLookupKey } from "../core/platform.js";
+import type { ResolvedIdentity } from "./identity.js";
 export type AuthzContext = {
   agentId?: string;
   requesterSenderId?: string | null;
   senderIsOwner?: boolean;
 };
-
-export type OwnerClaimContext = {
-  workspaceKey: string;
-  sessionKey: string;
-  senderId: string;
-};
-
-export type OwnerClaimStore = {
-  claims: Set<string>;
-};
-
-export function createOwnerClaimStore(): OwnerClaimStore {
-  return { claims: new Set<string>() };
-}
-
-export function ownerClaimKey(ctx: OwnerClaimContext): string {
-  return [ctx.workspaceKey, ctx.sessionKey, ctx.senderId].join("\u0000");
-}
-
-/** Bind a host-trusted inbound owner bit to exactly one workspace/session/sender. */
-export function claimOwnerForTurn(store: OwnerClaimStore, ctx: OwnerClaimContext): void {
-  store.claims.add(ownerClaimKey(ctx));
-}
-
-/** Consume a single-use exact owner claim; no cross-sender inheritance or fallback. */
-export function consumeOwnerClaim(store: OwnerClaimStore, ctx: OwnerClaimContext): boolean {
-  const key = ownerClaimKey(ctx);
-  if (!store.claims.has(key)) return false;
-  store.claims.delete(key);
-  return true;
-}
-
-export function clearOwnerClaims(store: OwnerClaimStore): void {
-  store.claims.clear();
-}
-
-/** Drop any stale claim before admitting a fresh host-trusted owner event. */
-export function resetOwnerClaim(store: OwnerClaimStore, ctx: OwnerClaimContext): void {
-  store.claims.delete(ownerClaimKey(ctx));
-}
 
 /**
  * Agent tools trust exactly one host-provided owner bit for the current turn.
@@ -64,11 +26,11 @@ export const WRITE_TOOL_NAMES = new Set([
   "people_remember",
   "people_name",
   "people_note",
+  "people_bot_hint",
   "people_bind",
   "people_forget",
   "people_bootstrap",
   "people_backup",
-  "people_cycle",
   "people_merge",
   "people_merge_account",
   "people_unbind",
@@ -85,16 +47,26 @@ export function authorizeWorkspace(
   throw new Error("识人工具只使用当前会话 agent 的工作区；请在该工作区的 agent 会话中操作。");
 }
 
-/** Whether a resolved group is the conversation the caller is currently in. */
+/**
+ * A group is current only when the complete host-resolved identity space and
+ * chat id match. A bare chat id is never enough: the same number in another
+ * channel/backend is an independent group.
+ */
 export function groupMatchesCurrent(
-  group: { group_id: string; chat_id: string },
-  current: string | undefined | null,
+  group: { group_id: string; platform: string; chat_id: string },
+  current: ResolvedIdentity | undefined | null,
 ): boolean {
-  const value = current?.trim();
-  if (!value) return false;
+  const platform = current?.platform?.trim();
+  const chatId = current?.chatId?.trim();
+  if (
+    !platform ||
+    !chatId ||
+    current?.isGroup !== true ||
+    current?.source === "deferred" ||
+    (platform.toLowerCase() === "bncr" && !platform.includes("/"))
+  ) return false;
   return (
-    group.chat_id === value ||
-    group.group_id === value ||
-    group.group_id.endsWith(`:${value}`)
+    platformLookupKey(group.platform) === platformLookupKey(platform) &&
+    group.chat_id === chatId
   );
 }

@@ -1,7 +1,11 @@
 import { resolveWorkspaceRoot } from "../core/paths.js";
-import { describeCounts } from "../core/service.js";
+import { describeCounts, safeContextValue } from "../core/service.js";
 function printJson(value) {
     process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+function setCommandStatus(ok) {
+    if (!ok)
+        process.exitCode = 1;
 }
 function describeCapture(capture) {
     return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 挂起 ${capture.deferredCount}`;
@@ -47,9 +51,9 @@ export function registerCli(api, runtime) {
             const status = service.status();
             if (options.json)
                 return printJson(status);
-            console.log(`工作区: ${status.workspaceDir}`);
-            console.log(`数据目录: ${status.dataDir}`);
-            console.log(`数据库: ${status.dbPath} (schema v${status.schemaVersion})`);
+            console.log(`工作区: ${safeContextValue(status.workspaceDir, 500)}`);
+            console.log(`数据目录: ${safeContextValue(status.dataDir, 500)}`);
+            console.log(`数据库: ${safeContextValue(status.dbPath, 500)} (schema v${status.schemaVersion})`);
             console.log(describeCounts(status.counts));
             console.log(`最近全量扫描: ${status.lastFullScanAt ?? "无"}`);
             console.log(`旧 JSON 导入: ${status.legacyImportedAt ?? "无"}`);
@@ -58,7 +62,7 @@ export function registerCli(api, runtime) {
             console.log(svc
                 ? `后台维护: ${svc.active ? "运行中" : "未运行"}; 启动 ${svc.startedAt ?? "无"}; 最近调度 ${svc.scheduledAt ?? "无"}; 最近完成 ${svc.completedAt ?? "无"}; 最近失败 ${svc.lastError ?? "无"}`
                 : "后台维护: 无状态");
-            console.log(`授权链: owner 只认宿主本轮 senderIsOwner=true; 写入工具: ${status.security.writeTools ? "开" : "关"}`);
+            console.log(`授权链: owner 只认宿主本次工具执行上下文的 senderIsOwner=true，或精确 toolCallId 的一次性 requester.senderIsOwner receipt; 写入工具: ${status.security.writeTools ? "开" : "关"}`);
         });
         people
             .command("validate")
@@ -70,16 +74,26 @@ export function registerCli(api, runtime) {
             .action(async (options = {}) => {
             const { workspaceDir, agentId } = workspaceFor(api, options);
             const service = runtime.get({ workspaceDir, agentId });
-            const actions = options.fix ? service.repair() : [];
+            const repaired = options.fix ? service.repairWithBackup() : null;
+            const actions = repaired?.actions ?? [];
             const report = service.validate();
-            if (options.json)
-                return printJson({ ...report, repairActions: actions });
-            console.log(`${report.ok ? "OK" : "FAIL"} ${report.dbPath}`);
+            setCommandStatus(report.ok);
+            if (options.json) {
+                return printJson({
+                    ...report,
+                    repairActions: actions,
+                    backup: repaired?.backup ?? null,
+                });
+            }
+            console.log(`${report.ok ? "OK" : "FAIL"} ${safeContextValue(report.dbPath, 500)}`);
             console.log(describeCounts(report.counts));
-            for (const issue of report.issues)
-                console.log(`[${issue.level}] ${issue.code}: ${issue.message}`);
+            if (repaired)
+                console.log(`备份: ${safeContextValue(repaired.backup.dbBackup, 500)}`);
+            for (const issue of report.issues) {
+                console.log(`[${issue.level}] ${safeContextValue(issue.code, 80)}: ${safeContextValue(issue.message, 500)}`);
+            }
             for (const action of actions)
-                console.log(`[fix] ${action}`);
+                console.log(`[fix] ${safeContextValue(action, 500)}`);
         });
         people
             .command("bootstrap")
@@ -92,7 +106,7 @@ export function registerCli(api, runtime) {
             const status = runtime.get({ workspaceDir, agentId }).status();
             if (options.json)
                 return printJson(status);
-            console.log(`已初始化: ${status.dbPath}`);
+            console.log(`已初始化: ${safeContextValue(status.dbPath, 500)}`);
             console.log(describeCounts(status.counts));
             console.log(`旧 JSON 导入: ${status.legacyImportedAt ?? "无"}`);
         });
@@ -109,9 +123,9 @@ export function registerCli(api, runtime) {
             const report = runtime.get({ workspaceDir, agentId }).backup(keep);
             if (options.json)
                 return printJson(report);
-            console.log(`备份目录: ${report.backupDir}`);
-            console.log(`SQLite: ${report.dbBackup} (${report.dbBytes} bytes)`);
-            console.log(`JSON: ${report.jsonBackup} (${report.jsonBytes} bytes)`);
+            console.log(`备份目录: ${safeContextValue(report.backupDir, 500)}`);
+            console.log(`SQLite: ${safeContextValue(report.dbBackup, 500)} (${report.dbBytes} bytes)`);
+            console.log(`JSON: ${safeContextValue(report.jsonBackup, 500)} (${report.jsonBytes} bytes)`);
             console.log(`保留 ${report.kept} 份，清理旧文件 ${report.removedOld} 个`);
         });
         people
@@ -123,14 +137,16 @@ export function registerCli(api, runtime) {
             .action(async (options = {}) => {
             const { workspaceDir, agentId } = workspaceFor(api, options);
             const report = runtime.get({ workspaceDir, agentId }).health();
+            setCommandStatus(report.ok);
             if (options.json)
                 return printJson(report);
-            console.log(`${report.ok ? "OK" : "FAIL"} ${report.dbPath}`);
+            console.log(`${report.ok ? "OK" : "FAIL"} ${safeContextValue(report.dbPath, 500)}`);
             console.log(`最近备份: ${report.lastBackupAt ?? "无"}`);
             console.log(describeCapture(report.capture));
             console.log(describeCounts(report.counts));
-            for (const issue of report.issues)
-                console.log(`[${issue.level}] ${issue.code}: ${issue.message}`);
+            for (const issue of report.issues) {
+                console.log(`[${issue.level}] ${safeContextValue(issue.code, 80)}: ${safeContextValue(issue.message, 500)}`);
+            }
         });
         people
             .command("cycle")
@@ -152,16 +168,18 @@ export function registerCli(api, runtime) {
                 console.log("本工作区已有维护轮次在执行，本轮跳过。");
                 return;
             }
+            setCommandStatus(report.health.ok && report.semantic.failed === 0);
             if (options.json)
                 return printJson(report);
             console.log(`周期: ${report.cycledAt}`);
             console.log(report.backup ? `备份: ${report.backup.dbBackup}` : "备份: 跳过");
-            console.log(`自动修复: ${report.repairActions.length ? report.repairActions.join("；") : "无"}`);
+            console.log(`自动修复: ${report.repairActions.length ? report.repairActions.map((action) => safeContextValue(action, 500)).join("；") : "无"}`);
             console.log(`健康: ${report.health.ok ? "ok" : "error"}，待办 ${report.actions.length} 项`);
             console.log(`内部语义压缩: ${report.semantic.unavailable ? "不可用，原文保留" : `完成 ${report.semantic.compacted}/${report.semantic.processed}`}; 失败 ${report.semantic.failed}; 剩余 ${report.semantic.remaining}`);
             if (runtime.config.debug) {
-                for (const action of report.actions)
-                    console.log(`[${action.kind}] ${action.target}: ${action.message}`);
+                for (const action of report.actions) {
+                    console.log(`[${action.kind}] ${safeContextValue(action.target, 160)}: ${safeContextValue(action.message, 500)}`);
+                }
             }
         });
         people
@@ -181,14 +199,18 @@ export function registerCli(api, runtime) {
             if (options.json)
                 return printJson(report);
             console.log(`账号 ${report.accounts.length} · 人物 ${report.persons.length} · 印象 ${report.impressions.length} · 群事件 ${report.groupEvents.length}`);
-            for (const account of report.accounts)
-                console.log(`账号 ${account.account_id} (${account.display_name ?? "?"})`);
-            for (const person of report.persons)
-                console.log(`人物 ${person.person_id} (${person.name ?? "?"})`);
-            for (const impression of report.impressions)
-                console.log(`印象 ${impression.owner_id}: ${impression.content}`);
-            for (const event of report.groupEvents)
-                console.log(`群事件 ${event.group_id}: ${event.summary}`);
+            for (const account of report.accounts) {
+                console.log(`账号 ${safeContextValue(account.account_id, 160)} (${safeContextValue(account.display_name ?? "?", 80)})`);
+            }
+            for (const person of report.persons) {
+                console.log(`人物 ${safeContextValue(person.person_id, 80)} (${safeContextValue(person.name ?? "?", 80)})`);
+            }
+            for (const impression of report.impressions) {
+                console.log(`印象 ${safeContextValue(impression.owner_id, 160)}: ${safeContextValue(impression.content, 500)}`);
+            }
+            for (const event of report.groupEvents) {
+                console.log(`群事件 ${safeContextValue(event.group_id, 160)}: ${safeContextValue(event.summary, 500)}`);
+            }
         });
     }, { commands: ["people"] });
 }

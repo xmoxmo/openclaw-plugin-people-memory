@@ -47,6 +47,16 @@ export function realpathOrResolve(value: string): string {
 
 export function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // mkdir mode only applies to newly created directories. Tighten an existing
+  // data directory when the platform supports POSIX modes; compatibility wins
+  // if a filesystem cannot apply chmod.
+  if (process.platform !== "win32") {
+    try {
+      fs.chmodSync(dir, 0o700);
+    } catch {
+      // Best effort: some mounted filesystems do not support chmod.
+    }
+  }
 }
 
 /** Stable, readable directory name for a workspace's state directory. */

@@ -34,7 +34,7 @@ OpenClaw 的识人插件。按 **agent 可见工作区** 隔离数据：同一�
 - 稳定身份是「频道身份空间 + 用户 ID / 群 ID」。普通频道的身份空间是频道名整体（如 `telegram`）；BNCR 带多个后端，身份空间是 `bncr/GewePlus`、`bncr/tgBot` 这类整体。宿主 `accountId` / `Primary` 是路由账号，不参与识人身份。
 - BNCR 的两点只跟它的接入结构有关，不代表别的频道缺能力：
   - 同族自动归并只针对 GewePlus 与 GolemPlus——这两个后端 senderid 空间一致，同一 sender 才需要归到同一个人物。别的频道没有"同一人两条接入同 id"的情况，本来就不需要归并。
-  - bot 识别靠群 botNames + `current_role=bot`，是通用逻辑，有群成员信息就能用。
+  - bot 判断靠群 botNames、成员分类形成 `bot_hint=unknown|human|bot|mixed`，仅作可能误判的历史提示；它不参与身份、owner 授权、绑定、归并或回复硬门禁。画像和绑定仍使用普通账号规则，owner 可用 `people_bot_hint` 修正。
 - 频道不在 `channelContext` 里给昵称/群标题时，插件用 `inbound_claim` 从入站事件被动补录，仍能建档。
 
 ## 安装
@@ -82,7 +82,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
             "tools": {
               "alsoAllow": [
                 "people_status", "people_lookup", "people_remember", "people_name", "people_note",
-                "people_bind", "people_forget", "people_validate", "people_scan_mark", "people_bootstrap",
+                "people_bot_hint", "people_bind", "people_forget", "people_validate", "people_scan_mark", "people_bootstrap",
                 "people_backup", "people_health", "people_cycle", "people_search", "people_dimension",
                 "people_merge", "people_merge_account", "people_unbind"
               ]
@@ -106,6 +106,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 | `people_remember` | 记一条事实/印象，可写入维度（key 或中文标签均可）；`person` 参数用于人物级画像 | 自己；owner 可指定他人/人物 |
 | `people_name` | 设置 call_name / confirmed_name / 人物名 | 自己；owner 可指定他人 |
 | `people_note` | 追加群记忆 | 当前群成员 |
+| `people_bot_hint` | 修正账号的历史行为推断 `unknown/human/bot/mixed`；`mixed` 表示人与 bot 可能共用账号。该值仅供参考，不是身份或授权 | owner |
 | `people_bind` | 账号绑定到人物，合并画像 | owner |
 | `people_forget` | 删除匹配的印象/特征；`scope` 限定范围；`purge: true` 同时清除备份与旧归档（不可恢复） | 自己；owner 可指定他人/人物 |
 | `people_validate` | 诊断入口：一致性校验，可选修复 | 仅 owner |
@@ -120,7 +121,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 | `people_merge_account` | 合并同一人物的双份账号，迁移印象、特征、群成员和绑定 | owner，需 confirm |
 | `people_unbind` | 解绑账号并默认复制人物画像回账号 | owner，需 confirm |
 
-账号引用可写规范 id（`bncr/GewePlus:wxid_x`），也可写 `bncr:GewePlus:wxid_x`。群引用支持完整 group_id、纯数字 chat_id，以及 `GewePlus:123456789` 这类带平台前缀的写法。owner 权限只认宿主当前轮次的 `senderIsOwner=true`；插件不设白名单、不按 sender ID / agent ID / cron 身份推断 owner、不缓存、不跨轮复用。`inbound_claim` 的单次 owner claim 消费即删，新一轮要重新由宿主给出。后台维护由插件内部调用完成，不通过 agent 工具提权；显式查询不要求当前发送者已有账号行。
+账号引用可写规范 id（`bncr/GewePlus:wxid_x`），也可写 `bncr:GewePlus:wxid_x`。群引用支持完整 group_id、纯数字 chat_id，以及 `GewePlus:123456789` 这类带平台前缀的写法。owner 权限只认宿主对当前调用给出的标准 owner 字段：工具执行上下文的 `senderIsOwner=true`，或 `before_tool_call` 的 `requester.senderIsOwner=true` 按精确 `toolCallId` 形成的一次性 receipt。两条路径都不跨调用、跨轮缓存。插件不设白名单，不按 sender ID / agent ID / cron 身份推断 owner。后台维护由插件内部调用完成，不通过 agent 工具提权；显式查询不要求当前发送者已有账号行。
 
 状态与诊断是两个入口：普通 agent 用 `people_status` 看是否正常，也可查自己的画像；完整诊断（`people_health` / `people_validate` / `people_cycle`）只给 owner。agent 工具始终绑定当前会话 agent 的工作区，不接受 `workspace` 参数切换；要操作另一个工作区，就在该工作区有权限的 agent 会话中执行。CLI 的 `--workspace` 属于本机 operator 入口，由宿主文件系统权限约束。
 
@@ -131,9 +132,9 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 1. 从频道上下文解析平台、发送者、会话。
 2. 首次见到账号时建档，更新 `display_name` 与 `last_interaction`。
 3. 识别群会话时更新群标题与成员。
-4. 注入一张 `<people_context>` 小卡片，包含当前对象画像和最近群记忆。
+4. 注入一张 `<people_context>` 小卡片，包含当前对象画像和最近群记忆。已知 `bot_hint` 时只增加一条标量提示行，`unknown` 不增加行；卡片先声明固定规则，再把昵称、备注、特征、群标题和群事件作为不可信数据逐字段净化。文字中的命令、工具调用形状和授权声明都不生效。
 
-同一账号 30 秒内只写一次，避免重试和多轮调用造成写放大。任何异常都不会中断对话，只会记一条警告日志。
+同一个工作区里的同一身份空间、同一群聊或私聊在 30 秒内只捕获一次；同一发送者在不同群之间切换仍会分别建档，避免重试和多轮调用造成写放大。任何异常都不会中断对话，只会记一条警告日志。
 
 当某个画像的零散印象超过 12 条时，后台 service 在下一轮维护中用插件内部隔离模型压缩画像。注入卡片只给当前 agent 必要的提示，不把画像原文或维护计划交给普通 agent；owner 也不需要手动整理。
 
@@ -162,7 +163,7 @@ BNCR 标准入站投递目标读不到后端时，才回退反解 `sessionKey` �
 - `scan-state.json`（`channels` 数组或 dict）
 - `trait-dimensions.json`
 
-账号与人物上的 `call_name`（本人钦定称呼）会一并导入，优先级高于 `confirmed_name` 和平台昵称。
+账号与人物上的 `call_name`（本人钦定称呼）会一并导入，优先级高于 `confirmed_name` 和平台昵称。旧账号画像的 `current_role=bot|human|user|mixed` 会映射为 `bot_hint`，`owner` 保持为角色，不会被推断成 bot。
 
 导入后：
 
@@ -211,7 +212,7 @@ npm test
 | 写入与回滚 | 插件统一走 `PeopleDatabase`，先备份后修改 |
 | 对外输出 | 仅计数、状态和错误摘要；不输出画像原文，不向群投递 |
 
-main 与 orion 共用工作区库，只跑一轮维护；public 独立工作区库，单独跑一轮。插件升级后所有工作区一起生效，不需要改 agent 提示词。`people_cycle` 默认只读显示最近维护摘要，属于 owner 诊断入口；owner 可用 `run: true` 手动触发同一套插件内部逻辑，并与后台 service 共用工作区互斥锁。旧定时任务模板不再随包发布；升级后 service 启动会自动清理本插件旧周期任务，可用 `openclaw cron list --json | rg 'people-cycle|people-scan' || true` 核对。owner 只认宿主本轮 `senderIsOwner`；内部维护不由「没有 requesterSenderId」的 agent 工具轮次提权。
+main 与 orion 共用工作区库，只跑一轮维护；public 独立工作区库，单独跑一轮。插件升级后所有工作区一起生效，不需要改 agent 提示词。`people_cycle` 默认只读显示最近维护摘要，属于 owner 诊断入口；owner 可用 `run: true` 手动触发同一套插件内部逻辑，并与后台 service 共用工作区互斥锁。旧定时任务模板不再随包发布；升级后 service 启动会自动清理本插件旧周期任务，可用 `openclaw cron list --json | rg 'people-cycle|people-scan' || true` 核对。内部维护是插件后台的独立调用，不借用 agent 工具，也不由「没有 requesterSenderId」的轮次提权。
 
 维护规则见 `SELF-MANAGEMENT.md`；运行流程、手动调用和验收命令见 `RUNBOOK.md`。
 
@@ -219,13 +220,13 @@ main 与 orion 共用工作区库，只跑一轮维护；public 独立工作区�
 
 - 数据库按工作区隔离（默认 `<stateDir>/plugins/people/<workspace-key>/people.db`），不同工作区互不可见。
 - `people_lookup` 对非 owner 只允许查自己。
-- owner 身份由宿主授权链决定：只使用工具工厂上下文或本轮入站 claim 的 `senderIsOwner`，插件不根据 sender ID、画像角色、会话历史或配置白名单推断 owner。
+- owner 身份由宿主授权链决定：使用本次工具执行上下文的 `senderIsOwner=true`，或本次 `before_tool_call` 的 `requester.senderIsOwner=true` receipt；插件不根据 inbound claim、sender ID、画像角色、会话历史或配置白名单推断 owner。
 - 注入内容只给当前 agent，不进入对外回复；提示词明确要求不要原样展示。
 - 默认 `people_forget` 只删活动库；备份快照和旧 JSON 归档仍会保留。需要彻底清除时显式传 `purge: true`，它会同时删除 `backups/` 与旧归档（不可恢复）。
 
 ## 安全边界
 
-插件只依赖宿主授权链：agent 工具读取本轮 `senderIsOwner=true` 作为 owner 身份；缺失时就是普通调用，不根据 cron、heartbeat、subagent、agent ID、sender ID 或配置白名单补权。owner claim 按「工作区 + sessionKey + senderId」单次绑定，消费一次即删，不跨轮复用；新入站轮次只有宿主再次明确给出 owner 标记才生效。后台维护是插件内部调用，不通过 agent 工具走授权。
+插件只依赖宿主授权链：工具执行上下文可直接提供本次 `senderIsOwner`；对只在钩子暴露该字段的宿主，`before_tool_call` 把它与精确 `toolCallId` 绑定成一次性 receipt，同 ID 的 `execute` 读取后立即删除。两条路径都缺失或为 `false` 时就是普通调用；插件不根据 cron、heartbeat、subagent、agent ID、sender ID 或配置白名单补权，也不跨调用或跨轮复用。后台维护是插件内部调用，不通过 agent 工具走授权。
 
 ```json
 {
@@ -237,7 +238,7 @@ main 与 orion 共用工作区库，只跑一轮维护；public 独立工作区�
 }
 ```
 
-- `writeTools`：写类工具总开关，默认 `true`；覆盖账号归并 `people_merge_account`。`capture` 只控制入站自动采集，`injectContext` 只控制注入；两者都不等于禁止工具写入。
+- `writeTools`：写动作总开关，默认 `true`。关闭后写类动作、`people_validate { fix: true }` 和 `people_cycle { run: true }` 被拒绝；只读状态、查询、校验报告、维护摘要和健康检查仍按权限可用。`capture` 只控制入站自动采集，`injectContext` 只控制注入。
 - 非 owner 只能查询或写入自己及当前群的群记忆；跨账号、跨群读写和 `people_forget` 的 `purge` 仅 owner。
 - agent 工具不接受 `workspace` 参数跨工作区；owner 权限也只在当前会话 agent 的工作区内有效。跨工作区要切换到该工作区的 agent 会话。
 - 多个 `senderFamilies` 会各自独立归并；同一 sender id 不会跨 family 共享人物、特征或印象。
