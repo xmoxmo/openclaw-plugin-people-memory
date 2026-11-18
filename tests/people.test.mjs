@@ -2910,6 +2910,80 @@ test("identity resolution uses standard fields, BNCR fallback and no host accoun
   assert.equal(mixedCaseGroup?.isGroup, true);
 });
 
+test("platform labels follow the layered read contract for any channel", () => {
+  const config = normalizeConfig({});
+
+  // Layer 1: chat.platform is the channel-published identity space.
+  const chatLabel = resolveHookIdentity({
+    channel: "bncr", senderId: "label-user-1", chatId: "label-chat-1",
+    channelContext: {
+      chat: { id: "label-chat-1", platform: "bncr/GolemPlus", kind: "group", title: "标签群" },
+      sender: { id: "label-user-1", platform: "ignored/sender-platform" },
+    },
+  }, config);
+  assert.equal(chatLabel.platform, "bncr/GolemPlus");
+  assert.equal(chatLabel.backend, "GolemPlus");
+  assert.equal(chatLabel.chatId, "label-chat-1");
+  assert.equal(chatLabel.isGroup, true);
+  assert.equal(chatLabel.chatTitle, "标签群");
+
+  // Layer 2: a flat metadata label backs up channels without channelContext.
+  const flatLabel = resolveInboundIdentity({
+    channel: "bncr", senderId: "label-user-2",
+    metadata: { platform: "bncr/tgBot" },
+  }, config);
+  assert.equal(flatLabel.platform, "bncr/tgBot");
+  assert.equal(flatLabel.backend, "tgBot");
+  assert.equal(flatLabel.source, "explicit", "a label names the identity space without a transport hex");
+
+  // Layer 3: a complete standard target outranks a conflicting label so the
+  // backend and chat always come from one coordinate.
+  const labelVersusTarget = resolveInboundIdentity({
+    channel: "bncr", senderId: "label-user-3",
+    conversationId: "-950",
+    metadata: { platform: "bncr/tgBot", to: "Bncr:GewePlus:-960:0" },
+  }, config);
+  assert.equal(labelVersusTarget.platform, "bncr/GewePlus");
+  assert.equal(labelVersusTarget.chatId, "-960");
+  assert.equal(labelVersusTarget.source, "standard");
+
+  // Agreeing label and target are consistent; the target chat id wins.
+  const agreeingLabel = resolveInboundIdentity({
+    channel: "bncr", senderId: "label-user-4",
+    conversationId: "-970",
+    metadata: { platform: "bncr/tgBot", to: "Bncr:tgBot:-970:0" },
+  }, config);
+  assert.equal(agreeingLabel.platform, "bncr/tgBot");
+  assert.equal(agreeingLabel.chatId, "-970");
+
+  // Sender-side labels never define the conversation identity space.
+  const senderLabelOnly = resolveInboundIdentity({
+    channel: "bncr", senderId: "label-user-5",
+    metadata: { sender: { platform: "bncr/tgBot" } },
+  }, config);
+  assert.equal(senderLabelOnly.source, "deferred");
+
+  // Non-multi channels keep their channel-name identity space even when a
+  // channel plugin publishes a qualified label.
+  const telegramLabel = resolveHookIdentity({
+    channel: "telegram", senderId: "label-user-6", chatId: "tg-chat",
+    channelContext: { chat: { id: "tg-chat", platform: "telegram/premium", kind: "group" } },
+  }, config);
+  assert.equal(telegramLabel.platform, "telegram");
+  assert.equal(telegramLabel.backend, undefined);
+  assert.equal(telegramLabel.chatId, "tg-chat");
+
+  // Custom channels may define their own multi-account space via config.
+  const customMulti = normalizeConfig({ multiAccountChannels: ["bridge"] });
+  const bridgeLabel = resolveHookIdentity({
+    channel: "bridge", senderId: "label-user-7", chatId: "bridge-chat",
+    channelContext: { chat: { id: "bridge-chat", platform: "bridge/wxapp", kind: "direct" } },
+  }, customMulti);
+  assert.equal(bridgeLabel.platform, "bridge/wxapp");
+  assert.equal(bridgeLabel.backend, "wxapp");
+  assert.equal(bridgeLabel.isGroup, false);
+});
+
 test("capture throttle preserves rapid switches between groups", async () => {
   const entry = (await import("../dist/index.js")).default;
   const workspace = tempWorkspace();

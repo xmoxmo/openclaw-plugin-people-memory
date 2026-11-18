@@ -110,16 +110,36 @@ function parseBncrTarget(value) {
         return { backend, chatId: userId, isGroup: false };
     return { backend };
 }
+/** Ordered platform-label candidates, channel neutral. */
+function platformLabelCandidates(metadata) {
+    const chat = record(metadata.chat);
+    const values = [];
+    // Layer 1: the conversation's own declaration. The backend belongs to the
+    // chat; a sender-side label describes a different object and must not be
+    // combined with this conversation's account/group rows.
+    for (const key of ["platform", "provider"]) {
+        const value = firstString(chat, [key]);
+        if (value && !values.includes(value))
+            values.push(value);
+    }
+    // Layer 2: flat metadata labels. Channels without channelContext may still
+    // publish the identity space at the top level.
+    for (const key of ["platform", "provider", "surface"]) {
+        const value = firstString(metadata, [key]);
+        if (value && !values.includes(value))
+            values.push(value);
+    }
+    return values;
+}
 function metadataFields(metadata) {
+    const chat = record(metadata.chat);
     return {
         to: firstString(metadata, ["to"]),
         originatingTo: firstString(metadata, ["originatingTo"]),
         from: firstString(metadata, ["from"]),
-        platform: firstString(metadata, ["platform", "provider"]) ??
-            firstString(record(metadata.chat), ["platform", "provider"]) ??
-            firstString(record(metadata.sender), ["platform", "provider"]),
+        platformLabels: platformLabelCandidates(metadata),
         groupTitle: firstString(metadata, ["group_subject", "groupSubject", "groupName", "group_name", "channelName"]) ??
-            firstString(record(metadata.chat), ["title", "name", "subject"]),
+            firstString(chat, ["title", "name", "subject"]),
         senderId: firstString(metadata, ["senderId", "sender_id"]),
     };
 }
@@ -141,20 +161,33 @@ function isMultiAccountChannel(channel, config) {
 }
 function channelIdentity(params) {
     const multi = params.config.multiAccountChannels ?? ["bncr"];
+    const isMulti = multi.some((value) => value.trim().toLowerCase() === params.channel.toLowerCase());
     const platform = clean(params.platform);
-    if (platform && platform.includes("/"))
+    // A fully qualified identity-space label is only meaningful for channels
+    // that own a backend dimension. Other channels stay keyed by their channel
+    // name no matter what label a channel plugin publishes.
+    if (isMulti && platform && platform.includes("/"))
         return normalizePlatform(platform);
     return resolvePlatform({
         channel: params.channel,
-        backend: multi.some((value) => value.trim().toLowerCase() === params.channel.toLowerCase()) ? params.backend : undefined,
+        backend: isMulti ? params.backend : undefined,
         backendChannels: multi,
         template: params.config.platformTemplate,
         overrides: params.config.platformOverrides,
     });
 }
-/** Standard host fields first; BNCR hex session segment is the last-resort fallback. */
+/**
+ * Identity resolution order, channel neutral:
+ *   1. channelContext.chat.platform / provider (channel-published identity space)
+ *   2. flat metadata platform / provider / surface (channel-published fallback)
+ *   3. standard route targets (host fields; a complete target wins over labels
+ *      so backend and chat always come from one coordinate)
+ *   4. BNCR sessionKey hex (BNCR-only transport fallback)
+ */
 function standardIdentity(params) {
-    const platform = normalizeBackendLabel(params.channel, params.platform);
+    const labelBackend = (params.platformLabels ?? [])
+        .map((candidate) => normalizeBackendLabel(params.channel, candidate))
+        .find(Boolean);
     const conversation = clean(params.conversationId);
     const conversationTarget = params.multi ? parseBncrTarget(conversation) : undefined;
     const metadataTarget = params.multi
@@ -167,7 +200,7 @@ function standardIdentity(params) {
     // When a standard target is available, its backend and chat id belong to
     // the same host-normalized coordinate. A separate platform label may be
     // older or less specific, so it must not be combined with that target.
-    const backend = target?.backend ?? platform;
+    const backend = target?.backend ?? labelBackend;
     let chatId = params.multi
         ? (matchesBncrSessionHex(conversation, params.sessionKey) ? undefined : conversation)
         : conversation;
@@ -192,7 +225,7 @@ function standardIdentity(params) {
             };
         }
     }
-    let source = target?.backend ? "standard" : platform ? "explicit" : "standard";
+    let source = target?.backend ? "standard" : labelBackend ? "explicit" : "standard";
     // A standard backend with a missing chat id can still use the decoded
     // session's transport target. Standard fields remain authoritative for the
     // backend; only the absent chat coordinate comes from fallback.
@@ -222,8 +255,30 @@ export function hookIsGroup(ctx) {
     const chat = record(ctx.channelContext?.chat);
     if (chat.isGroup === true || chat.is_group_chat === true || chat.isGroupChat === true)
         return true;
-    const type = firstString(chat, ["type", "kind", "chat_type", "chatType"]);
-    return type?.toLowerCase() === "group" || type?.toLowerCase() === "channel" || type?.toLowerCase() === "supergroup";
+    const type = firstString(chat, ["type", "kind", "chat_type", "chatType"])?.toLowerCase();
+    if (type === "group" || type === "channel" || type === "supergroup")
+        return true;
+    // Channels publishing the group/direct contract (e.g. BNCR chat.kind)
+    // state the direction explicitly; trust it instead of guessing.
+    if (type === "direct" || type === "dm" || type === "private")
+        return false;
+    return undefined;
+}
+/**
+ * Layer 1 platform labels for hook turns: the conversation's own published
+ * identity space. Channel neutral — any channel plugin may set
+ * channelContext.chat.platform (or provider) and participate in standard
+ * identity resolution without channel-specific code here.
+ */
+export function hookPlatformLabels(ctx) {
+    const chat = record(ctx.channelContext?.chat);
+    const values = [];
+    for (const key of ["platform", "provider"]) {
+        const value = firstString(chat, [key]);
+        if (value && !values.includes(value))
+            values.push(value);
+    }
+    return values;
 }
 export function inboundGroupTitle(event) {
     return metadataFields(record(event.metadata)).groupTitle;
@@ -238,7 +293,7 @@ export function resolveInboundIdentity(event, config, context, workspaceKey) {
     const resolved = standardIdentity({
         channel,
         multi,
-        platform: multi ? fields.platform : undefined,
+        platformLabels: multi ? fields.platformLabels : undefined,
         targets: [fields.to, fields.originatingTo, fields.from].filter((value) => Boolean(value)),
         sessionKey: clean(event.sessionKey) ?? clean(context?.sessionKey),
         conversationId: clean(event.conversationId) ?? clean(context?.conversationId) ?? clean(context?.parentConversationId),
@@ -283,8 +338,6 @@ export function resolveInboundIdentity(event, config, context, workspaceKey) {
     };
 }
 export function resolveHookIdentity(ctx, config, inbound, workspaceKey, sessionFallbackKey) {
-    const chat = record(ctx.channelContext?.chat);
-    const sender = record(ctx.channelContext?.sender);
     const channel = channelName(ctx.channel, ctx.channelId, ctx.messageProvider, inbound?.channel);
     if (!channel)
         return undefined;
@@ -292,11 +345,11 @@ export function resolveHookIdentity(ctx, config, inbound, workspaceKey, sessionF
     const resolved = standardIdentity({
         channel,
         multi,
-        platform: multi ? firstString(chat, ["platform", "provider"]) ?? firstString(sender, ["platform", "provider"]) : undefined,
+        platformLabels: hookPlatformLabels(ctx),
         targets: [ctx.deliveryContext?.to].filter((value) => Boolean(value)),
         sessionKey: sessionFallbackKey,
         conversationId: hookChatId(ctx),
-        isGroup: hookIsGroup(ctx) || undefined,
+        isGroup: hookIsGroup(ctx),
         config,
     });
     // Standard or explicit fields from this turn outrank a cached inbound

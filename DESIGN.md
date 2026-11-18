@@ -143,10 +143,23 @@ src/plugin/              OpenClaw 适配
 
 身份空间、sender ID、chat ID 只能来自宿主归一化元信息。读取优先级：
 
-1. channelContext / 入站事件明确给出的完整身份空间，例如 `bncr/tgBot`。
-2. 标准入站字段：channel、channelId、messageProvider、senderId、conversationId，以及 metadata.to / originatingTo 的归一化投递目标 `Bncr:<后端>:<群>:<用户>`。BNCR 以 metadata 目标的真实 chat ID 为准；其他频道使用 conversationId 和频道名整体。
-3. 仅当频道是 BNCR 且上述标准字段都拿不到后端或 chat 时，才反解 sessionKey 的 hex 会话段。兼容两种实际形态：四段目标 `Bncr:<后端>:<群>:<用户>`，以及两段传输坐标 `<后端>:<chat>`；两段形态只接受 scope 明确为 `group` 或 `direct` 的会话，方向来自 scope。无法判定方向时继续 deferred。这是兼容回退，不用于普通频道，也不能覆盖标准字段已经给出的身份。
-4. 仍无法确定 BNCR 后端时 deferred：不建裸 `bncr` 账号 / 群行，不按 sender ID 猜最近后端，不注入画像；记录一次未识别心跳。
+1. 频道自述身份空间（层 1 / 层 2）：`channelContext.chat.platform`（或 `provider`），其次扁平 metadata 的 `platform` / `provider` / `surface`。这是频道插件自己发布的完整身份空间，如 `bncr/GolemPlus`。该字段描述会话所属的后端，与发送者无关，因此只读 chat，不读 sender。标准目标与标签冲突时目标优先（后端与 chat 必须来自同一坐标），一致时互为印证。多账号频道才接受带 `/` 的标签；普通频道即使发布标签仍按频道名落位。
+2. 标准入站字段（层 3）：channel、channelId、messageProvider、senderId、conversationId，以及 metadata.to / originatingTo 的归一化投递目标 `Bncr:<后端>:<群>:<用户>`。BNCR 以 metadata 目标的真实 chat ID 为准；其他频道使用 conversationId 和频道名整体。
+3. BNCR hex 回退（层 4）：仅当频道是 BNCR 且上述字段都拿不到后端或 chat 时，才反解 sessionKey 的 hex 会话段。兼容两种实际形态：四段目标 `Bncr:<后端>:<群>:<用户>`，以及两段传输坐标 `<后端>:<chat>`；两段形态只接受 scope 明确为 `group` 或 `direct` 的会话，方向来自 scope。无法判定方向时继续 deferred。这是兼容回退，不用于普通频道，也不能覆盖标准字段已经给出的身份。
+4. 仍无法确定后端时 deferred：不建裸频道账号 / 群行，不按 sender ID 猜最近后端，不注入画像；记录一次未识别心跳。
+
+### 自定义频道接入契约
+
+任何频道插件只需发布以下通用字段即可进入标准读取，无需 People 侧做频道专属代码：
+
+| 字段 | 位置 | 说明 |
+|---|---|---|
+| `platform` | `channelContext.chat.platform`（推荐）或 metadata 顶层 `platform` | 完整身份空间 `<频道>/<后端>`；无后端的频道留空，按频道名落位 |
+| `kind` | `channelContext.chat.kind` | `group` 或 `direct`；显式声明方向，不猜测 |
+| `title` | `channelContext.chat.title` | 群标题，群聊可选 |
+| `id` | `channelContext.chat.id`、`channelContext.sender.id` | 会话 ID 与发送者 ID，与宿主 `ctx.chatId` / `ctx.senderId` 对齐 |
+
+多账号频道（含自定义频道）在 `multiAccountChannels` 配置中登记；同族平台用 `senderFamilies` 声明。BNCR 是该契约的第一个实现方（`channelContext.chat.platform` / `kind` / `title`）。
 
 一轮入站消息的身份解析结果按“工作区 + sessionKey / runId”共享给 before_prompt_build 和 people_* 工具，避免钩子与工具推导出不同身份。宿主缺少 sessionKey 和 runId 时，只允许以工作区 + 身份空间 + sender + chat 精确匹配到一个候选；不会仅按 sender 回退。这个身份缓存只有短 TTL，只含频道、后端、用户 / 群 ID、昵称、群标题和群聊标记，不含正文，也不含 owner 授权。工具没有可确认的身份时要求显式 account，不按裸 sender ID 回退。owner 身份由宿主逐工具调用授权：优先使用工具执行上下文的本轮 `senderIsOwner`；对只在钩子提供该字段的宿主，`before_tool_call` 读取本次 `ctx.requester.senderIsOwner`，以精确 `toolCallId` 交给同一次 `execute`，读取即删；`after_tool_call` 和 `gateway_stop` 清理未消费残留。`inbound_claim` 和 `message_received` 共用入站观察入口，只建立身份元数据，并在缓存前统一剥离 owner 标记。两条路径都只代表当前调用，不缓存、不跨轮复用。没有本次宿主 owner 字段或 receipt 就不是 owner，不按 sender ID、画像角色、会话历史、cron、agent ID 或白名单推断。owner 查询指定账号时不依赖当前发送者已有账号行。后台维护是插件内部调用，不通过 agent 工具提权。
 

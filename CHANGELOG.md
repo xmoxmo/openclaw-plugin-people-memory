@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0 — 四层身份读取与自定义频道契约（2026-11-18）
+
+- 身份字段按四层通用顺序读取：`channelContext.chat.platform` → 扁平 metadata `platform` / `provider` / `surface` → 标准投递目标 `metadata.to` / `originatingTo` → BNCR sessionKey hex。标签与标准目标冲突时目标优先，后端与 chat 始终来自同一坐标。
+- `sender.platform` 不再参与身份解析：后端属于会话，不属于发送者，避免桥接消息凭空生成错误账号行。
+- 带 `/` 的身份空间标签只有 `multiAccountChannels` 中的频道接受；其他频道仍按频道名落位，不会被自定义标签改写。
+- `hookIsGroup` 识别通用 `kind` / `type` 契约：`group` / `channel` / `supergroup` 为群，`direct` / `dm` / `private` 为私聊，显式方向不再被默认值抹掉。
+- DESIGN 新增「自定义频道接入契约」：任意频道在 `channelContext.chat` 发布 `platform` / `kind` / `title` / `id` 并登记 `multiAccountChannels` 即可接入标准读取，无需频道专属代码；BNCR 是该契约的第一个实现方。
+
 ## 0.0.9 — BNCR 会话回退修复（2026-11-18）
 
 - 修复 BNCR 实际 `sessionKey` 的 hex 段为两段 `后端:chat` 时无法解析的问题。此前真实入站会持续落入 `deferred`，不会建档；现在仅在标准元数据缺后端或 chat、且 scope 明确为 `group` / `direct` 时回退解码，恢复正确的后端账号和群行。
