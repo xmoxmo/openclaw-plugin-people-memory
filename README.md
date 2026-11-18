@@ -148,7 +148,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 | `channel=telegram` | `telegram` | `telegram:<用户>` / `telegram:<群>` |
 | `channel=discord, accountId=work` | `discord` | `discord:<用户>` / `discord:<群>` |
 
-BNCR 标准入站投递目标读不到后端时，才回退反解 `sessionKey` 的 hex 会话段；其他频道只用标准字段。发送者名、群标题、是否群聊都按候选字段读取，兼容 `name / displayName / display_name / nickname / username`、`title / subject / group_subject`、`isGroup / type=group` 等常见形态。特殊频道可用 `platformOverrides` 显式自定义身份空间。
+BNCR 标准入站投递目标读不到后端或 chat 时，才回退反解 `sessionKey` 的 hex 会话段；支持旧的四段目标 `Bncr:<后端>:<群>:<用户>` 和宿主实际使用的两段 `<后端>:<chat>`，后者只接受 scope 明确为 `group` / `direct` 的会话，无法判定方向时继续 deferred。其他频道只用标准字段。发送者名、群标题、是否群聊都按候选字段读取，兼容 `name / displayName / display_name / nickname / username`、`title / subject / group_subject`、`isGroup / type=group` 等常见形态。特殊频道可用 `platformOverrides` 显式自定义身份空间。
 
 ## 从 JSON 迁移
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.9 — BNCR 会话回退修复（2026-11-18）
+
+- 修复 BNCR 实际 `sessionKey` 的 hex 段为两段 `后端:chat` 时无法解析的问题。此前真实入站会持续落入 `deferred`，不会建档；现在仅在标准元数据缺后端或 chat、且 scope 明确为 `group` / `direct` 时回退解码，恢复正确的后端账号和群行。
+- 保留四段 `Bncr:后端:群:用户` 旧格式兼容；标准元数据仍优先，非 BNCR 频道不启用该回退，无法判定方向的 scope 继续 fail closed。
+
 ## 0.0.8 — 身份、授权与维护加固（2026-11-10）
 
 - 新增账号级 `bot_hint=unknown|human|bot|mixed` 与 `bot_hint_source=history|group_evidence|manual`；它是根据历史行为作出的、可能误判的软提示，不影响身份、owner 授权、绑定、归并或回复硬门禁。`mixed` 表示人与 bot 可能共用账号。

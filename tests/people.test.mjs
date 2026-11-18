@@ -2796,6 +2796,34 @@ test("identity resolution uses standard fields, BNCR fallback and no host accoun
   assert.equal(fallback.chatId, "-300");
   assert.equal(fallback.isGroup, true);
 
+  // BNCR's real session scopes encode only `backend:chat`; the scope
+  // direction carries group/direct. This is still a last-resort fallback.
+  const scopedGroup = resolveInboundIdentity({
+    channel: "bncr", accountId: "Primary", senderId: "user-scoped-group",
+    sessionKey: "agent:public:bncr:group:" + Buffer.from("GolemPlus:123456789", "utf8").toString("hex"),
+    metadata: {},
+  }, config);
+  assert.equal(scopedGroup.platform, "bncr/GolemPlus");
+  assert.equal(scopedGroup.source, "session_fallback");
+  assert.equal(scopedGroup.chatId, "123456789");
+  assert.equal(scopedGroup.isGroup, true);
+
+  const scopedDirect = resolveInboundIdentity({
+    channel: "bncr", senderId: "user-scoped-direct",
+    sessionKey: "agent:main:bncr:direct:" + Buffer.from("tgBot:987654321", "utf8").toString("hex"),
+    metadata: {},
+  }, config);
+  assert.equal(scopedDirect.platform, "bncr/tgBot");
+  assert.equal(scopedDirect.chatId, "987654321");
+  assert.equal(scopedDirect.isGroup, false);
+
+  const unscopedPair = resolveInboundIdentity({
+    channel: "bncr", senderId: "user-unscoped-pair",
+    sessionKey: "agent:main:bncr:" + Buffer.from("GolemPlus:123456789", "utf8").toString("hex"),
+    metadata: {},
+  }, config);
+  assert.equal(unscopedPair.source, "deferred", "directionless scopes are not inferred as identity");
+
   const partial = resolveInboundIdentity({
     channel: "bncr", senderId: "user-partial",
     sessionKey: "agent:main:bncr:group:" + Buffer.from("Bncr:GewePlus:-301:0", "utf8").toString("hex"),

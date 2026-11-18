@@ -127,7 +127,22 @@ function decodedBncrSessionTarget(value: string | undefined): BncrTarget | undef
   const segment = value.split(":").pop()?.trim() ?? "";
   if (segment.length < 8 || segment.length % 2 !== 0) return undefined;
   const decoded = hexDecode(value);
-  return decoded ? parseBncrTarget(decoded) : undefined;
+  if (!decoded) return undefined;
+  const target = parseBncrTarget(decoded);
+  if (target) return target;
+  // BNCR session scopes use a two-segment transport form, e.g.
+  // `backend:chat`. Treat it as a transport coordinate only when the
+  // scope declares its group/direct direction, so arbitrary host text is not
+  // promoted into identity.
+  const scope = value.split(":").slice(0, -1).map((part) => part.toLowerCase());
+  const direction = scope.at(-1);
+  if (direction !== "group" && direction !== "direct") return undefined;
+  const parts = decoded.split(":");
+  if (parts.length !== 2) return undefined;
+  const backend = parts[0]?.trim();
+  const chatId = parts[1]?.trim();
+  if (!backend || backend === "0" || !chatId || chatId === "0") return undefined;
+  return { backend, chatId, isGroup: direction === "group" };
 }
 
 /** Only the exact decoded BNCR session segment is treated as transport hex. */
