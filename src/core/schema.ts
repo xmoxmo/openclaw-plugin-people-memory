@@ -140,6 +140,19 @@ CREATE TABLE IF NOT EXISTS scan_meta (
   last_full_scan_at TEXT,
   updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS capture_deferred_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  channel_context TEXT NOT NULL DEFAULT '0',
+  metadata_platform TEXT NOT NULL DEFAULT '0',
+  route_target TEXT NOT NULL DEFAULT '0',
+  session_hint TEXT NOT NULL DEFAULT '0',
+  agent_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_capture_deferred_events_time ON capture_deferred_events(occurred_at);
 `;
 
 export const DEFAULT_DIMENSIONS: Array<{ key: string; label: string; sort: number }> = [

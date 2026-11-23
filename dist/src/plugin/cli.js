@@ -8,7 +8,7 @@ function setCommandStatus(ok) {
         process.exitCode = 1;
 }
 function describeCapture(capture) {
-    return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 挂起 ${capture.deferredCount}`;
+    return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 近 7 天挂起 ${capture.deferredCount}`;
 }
 function workspaceFor(api, options) {
     const agentId = typeof options.agent === "string" ? options.agent : undefined;

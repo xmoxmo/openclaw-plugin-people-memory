@@ -2,7 +2,7 @@
   "id": "people",
   "name": "People Memory",
   "description": "Workspace-scoped people and group memory backed by SQLite.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "skills": [
     "skills/people-identifier"
   ],

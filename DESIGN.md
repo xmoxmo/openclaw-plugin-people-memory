@@ -146,7 +146,7 @@ src/plugin/              OpenClaw 适配
 1. 频道自述身份空间（层 1 / 层 2）：`channelContext.chat.platform`（或 `provider`），其次扁平 metadata 的 `platform` / `provider` / `surface`。这是频道插件自己发布的完整身份空间，如 `bncr/GolemPlus`。该字段描述会话所属的后端，与发送者无关，因此只读 chat，不读 sender。标准目标与标签冲突时目标优先（后端与 chat 必须来自同一坐标），一致时互为印证。多账号频道才接受带 `/` 的标签；普通频道即使发布标签仍按频道名落位。
 2. 标准入站字段（层 3）：channel、channelId、messageProvider、senderId、conversationId，以及 metadata.to / originatingTo 的归一化投递目标 `Bncr:<后端>:<群>:<用户>`。BNCR 以 metadata 目标的真实 chat ID 为准；其他频道使用 conversationId 和频道名整体。
 3. BNCR hex 回退（层 4）：仅当频道是 BNCR 且上述字段都拿不到后端或 chat 时，才反解 sessionKey 的 hex 会话段。兼容两种实际形态：四段目标 `Bncr:<后端>:<群>:<用户>`，以及两段传输坐标 `<后端>:<chat>`；两段形态只接受 scope 明确为 `group` 或 `direct` 的会话，方向来自 scope。无法判定方向时继续 deferred。这是兼容回退，不用于普通频道，也不能覆盖标准字段已经给出的身份。
-4. 仍无法确定后端时 deferred：不建裸频道账号 / 群行，不按 sender ID 猜最近后端，不注入画像；记录一次未识别心跳。
+4. 仍无法确定后端时 deferred：不建裸频道账号 / 群行，不按 sender ID 猜最近后端，不注入画像；写入一条脱敏诊断记录。诊断只保留 7 天，按原因聚合展示，包含当时各类宿主字段是否存在的布尔标记和 agent id，不含消息正文或 sender 身份。累计挂起数不再永久保存；状态里的挂起次数直接按最近 7 天记录计算，后台维护每轮清理超期明细。历史累计数字不补录。
 
 ### 自定义频道接入契约
 

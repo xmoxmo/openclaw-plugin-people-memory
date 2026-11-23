@@ -254,14 +254,14 @@ function formatDetailedStatus(service: PeopleService): string {
     `数据目录：${status.dataDir}`,
     `数据库：${status.dbPath}（schema v${status.schemaVersion}）`,
     `状态：${status.schemaVersion === SCHEMA_VERSION ? "正常" : "需检修"} · 写入工具：${status.security.writeTools ? "开" : "关"}`,
-    `采集：${status.capture.lastAt ? "有心跳" : "尚无心跳"} · 身份挂起 ${status.capture.deferredCount} 次`,
+    `采集：${status.capture.lastAt ? "有心跳" : "尚无心跳"} · 近 7 天身份挂起 ${status.capture.deferredCount} 次`,
     `后台维护：${maintenance.active ? "运行中" : "未运行"} · 最近完成：${maintenance.completedAt ?? "无"} · 最近失败：${maintenance.lastError ? "有" : "无"}`,
     `账号 ${counts.accounts ?? 0} · 人物 ${counts.persons ?? 0} · 绑定 ${counts.person_accounts ?? 0} · 群 ${counts.groups ?? 0}`,
     `群成员 ${counts.group_members ?? 0} · 群记忆 ${counts.group_events ?? 0} · 印象 ${counts.impressions ?? 0} · 特征 ${counts.traits ?? 0}`,
     `活跃维度：${status.dimensions.filter((dimension) => dimension.active).map((dimension) => dimension.key).join(", ")}`,
     `最近全量扫描：${status.lastFullScanAt ?? "无记录"}`,
     `旧 JSON 导入：${status.legacyImportedAt ?? "无"}`,
-    `采集心跳：${status.capture.lastAt ?? "无"} · 标准 ${status.capture.standardCount} · hex 回退 ${status.capture.sessionFallbackCount} · 挂起 ${status.capture.deferredCount}`,
+    `采集心跳：${status.capture.lastAt ?? "无"} · 标准 ${status.capture.standardCount} · hex 回退 ${status.capture.sessionFallbackCount} · 近 7 天挂起 ${status.capture.deferredCount}`,
     `维护启动：${maintenance.startedAt ?? "无"} · 间隔 ${maintenance.intervalMs ? Math.round(maintenance.intervalMs / 3_600_000) + "h" : "无"}`,
     `最近调度：${maintenance.scheduledAt ?? "无"} · 最近失败：${maintenance.lastError ?? "无"}`,
     `授权链：owner 只认宿主本次工具执行上下文的 senderIsOwner=true，或精确 toolCallId 的一次性 requester.senderIsOwner receipt`,
@@ -273,9 +273,17 @@ function formatDetailedHealth(report: ReturnType<PeopleService["health"]>): stri
     `${report.ok ? "✅" : "❌"} 识人库健康检查`,
     `数据库：${report.dbPath}`,
     `最近备份：${report.lastBackupAt ?? "无"}`,
-    `采集心跳：${report.capture.lastAt ?? "无"} · 标准 ${report.capture.standardCount} · hex 回退 ${report.capture.sessionFallbackCount} · 挂起 ${report.capture.deferredCount}`,
+    `采集心跳：${report.capture.lastAt ?? "无"} · 标准 ${report.capture.standardCount} · hex 回退 ${report.capture.sessionFallbackCount} · 近 7 天挂起 ${report.capture.deferredCount}`,
     `计数：${Object.entries(report.counts).map(([key, value]) => `${key}=${value}`).join("  ")}`,
   ];
+  const deferred = report.deferredEvents;
+  if (deferred) {
+    lines.push(`挂起诊断：近 ${deferred.windowDays} 天 ${deferred.total} 条 · 最近 ${deferred.lastAt ?? "无"}`);
+    for (const item of deferred.recent.slice(0, 10)) {
+      lines.push(`· ${item.reason}：${item.count} 条，最近 ${item.lastAt}`);
+    }
+    if (!deferred.recent.length) lines.push("· 近 7 天没有身份挂起明细");
+  }
   if (report.issues.length === 0) lines.push("没有发现需要处理的问题。");
   else {
     for (const issue of report.issues.slice(0, 50)) {

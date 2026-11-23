@@ -225,6 +225,20 @@ function standardIdentity(params) {
             };
         }
     }
+    let deferredReason;
+    if (params.multi && !backend) {
+        if (params.sessionKey && !sessionTarget)
+            deferredReason = "backend_missing_session_unusable";
+        else if (params.targets?.some((target) => parseBncrTarget(target)?.backend)) {
+            deferredReason = "backend_missing_unusable_route_target";
+        }
+        else if (!params.platformLabels?.length) {
+            deferredReason = "backend_missing_no_context_or_target";
+        }
+        else {
+            deferredReason = "identity_unresolved";
+        }
+    }
     let source = target?.backend ? "standard" : labelBackend ? "explicit" : "standard";
     // A standard backend with a missing chat id can still use the decoded
     // session's transport target. Standard fields remain authoritative for the
@@ -240,6 +254,7 @@ function standardIdentity(params) {
         isGroup,
         source,
         platform: backend ? `${params.channel}/${backend}` : undefined,
+        deferredReason,
     };
 }
 export function hookSenderName(ctx) {
@@ -286,6 +301,12 @@ export function inboundGroupTitle(event) {
 export function resolveInboundIdentity(event, config, context, workspaceKey) {
     const metadata = record(event.metadata);
     const fields = metadataFields(metadata);
+    const deferredFields = {
+        channelContext: Boolean(record(metadata.chat).platform || record(metadata.chat).provider),
+        metadataPlatform: fields.platformLabels.length > 0,
+        routeTarget: [fields.to, fields.originatingTo, fields.from].some((value) => Boolean(value)),
+        sessionHint: Boolean(clean(event.sessionKey) ?? clean(context?.sessionKey)),
+    };
     const channel = channelName(event.channel, event.channelId, context?.channelId, event.messageProvider);
     if (!channel)
         return undefined;
@@ -305,6 +326,8 @@ export function resolveInboundIdentity(event, config, context, workspaceKey) {
             channel,
             platform: channelIdentity({ channel, config }),
             source: "deferred",
+            deferredReason: resolved.deferredReason ?? "identity_unresolved",
+            deferredFields,
             workspaceKey,
             agentId: context?.agentId,
             senderId: clean(event.senderId) ?? clean(context?.senderId) ?? fields.senderId,
@@ -342,6 +365,12 @@ export function resolveHookIdentity(ctx, config, inbound, workspaceKey, sessionF
     if (!channel)
         return undefined;
     const multi = isMultiAccountChannel(channel, config);
+    const deferredFields = {
+        channelContext: hookPlatformLabels(ctx).length > 0,
+        metadataPlatform: Boolean(inbound?.deferredFields?.metadataPlatform),
+        routeTarget: Boolean(ctx.deliveryContext?.to) || Boolean(inbound?.deferredFields?.routeTarget),
+        sessionHint: Boolean(sessionFallbackKey ?? ctx.sessionKey ?? inbound?.sessionKey),
+    };
     const resolved = standardIdentity({
         channel,
         multi,
@@ -366,6 +395,8 @@ export function resolveHookIdentity(ctx, config, inbound, workspaceKey, sessionF
             channel,
             platform: channelIdentity({ channel, config }),
             source: "deferred",
+            deferredReason: resolved.deferredReason ?? inbound?.deferredReason ?? "identity_unresolved",
+            deferredFields,
             workspaceKey,
             agentId: ctx.agentId,
             senderId: clean(ctx.senderId) ?? inbound?.senderId,

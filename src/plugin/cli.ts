@@ -38,7 +38,7 @@ function describeCapture(capture: {
   sessionFallbackCount: number;
   deferredCount: number;
 }): string {
-  return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 挂起 ${capture.deferredCount}`;
+  return `采集心跳: ${capture.lastAt ?? "无"}; 标准 ${capture.standardCount}; hex 回退 ${capture.sessionFallbackCount}; 近 7 天挂起 ${capture.deferredCount}`;
 }
 
 function workspaceFor(api: OpenClawPluginApi, options: CliOptions): { workspaceDir: string; agentId?: string } {

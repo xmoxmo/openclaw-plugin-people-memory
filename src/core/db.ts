@@ -195,6 +195,7 @@ export class PeopleDatabase {
 
   private migrate(): void {
     const current = Number(this.metaGet("schema_version") ?? 0);
+    this.db.prepare("DELETE FROM meta WHERE key IN ('capture_deferred_at', 'capture_deferred_count')").run();
     this.ensureColumn("accounts", "call_name", "TEXT");
     this.ensureColumn("persons", "call_name", "TEXT");
     this.ensureColumn("accounts", "bot_hint", "TEXT NOT NULL DEFAULT 'unknown'");
@@ -288,6 +289,70 @@ export class PeopleDatabase {
     this.db
       .prepare("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(key, value);
+  }
+
+  addDeferredEvent(input: {
+    occurredAt: string;
+    channel: string;
+    reason: string;
+    channelContext: boolean;
+    metadataPlatform: boolean;
+    routeTarget: boolean;
+    sessionHint: boolean;
+    agentId?: string;
+  }): void {
+    const flag = (value: boolean) => (value ? "1" : "0");
+    this.db.prepare(
+      `INSERT INTO capture_deferred_events
+        (occurred_at, channel, reason, channel_context, metadata_platform, route_target, session_hint, agent_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.occurredAt,
+      input.channel,
+      input.reason.slice(0, 80),
+      flag(input.channelContext),
+      flag(input.metadataPlatform),
+      flag(input.routeTarget),
+      flag(input.sessionHint),
+      text(input.agentId),
+    );
+  }
+
+  deferredEvents(limit = 200): {
+    total: number;
+    lastAt: string | null;
+    windowDays: number;
+    recent: Array<{ reason: string; count: number; lastAt: string }>;
+  } {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const totalRow = this.db.prepare(
+      "SELECT COUNT(*) AS n, MAX(occurred_at) AS last_at FROM capture_deferred_events WHERE occurred_at >= ?",
+    ).get(cutoff) as Row | undefined;
+    const rows = this.db.prepare(
+      `SELECT reason, COUNT(*) AS n, MAX(occurred_at) AS last_at
+       FROM capture_deferred_events
+       WHERE occurred_at >= ?
+       GROUP BY reason
+       ORDER BY n DESC, last_at DESC
+       LIMIT ?`,
+    ).all(cutoff, Math.max(1, Math.min(500, limit))) as Array<Row>;
+    return {
+      total: number(totalRow?.n),
+      lastAt: text(totalRow?.last_at),
+      windowDays: 7,
+      recent: rows.map((row) => ({
+        reason: text(row.reason) ?? "identity_unresolved",
+        count: number(row.n),
+        lastAt: text(row.last_at) ?? "",
+      })),
+    };
+  }
+
+  pruneDeferredEvents(olderThanDays = 7): number {
+    const days = Number.isFinite(olderThanDays) ? Math.max(1, Math.min(365, Math.floor(olderThanDays))) : 7;
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const result = this.db.prepare("DELETE FROM capture_deferred_events WHERE occurred_at < ?").run(cutoff);
+    return Number(result.changes ?? 0);
   }
 
   /** Cross-process maintenance lease; stale leases expire without granting authority. */

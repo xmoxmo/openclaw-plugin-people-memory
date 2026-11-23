@@ -123,7 +123,7 @@ openclaw plugins install --link <plugin-dir> --force --no-enable
 
 账号引用可写规范 id（`bncr/GewePlus:wxid_x`），也可写 `bncr:GewePlus:wxid_x`。群引用支持完整 group_id、纯数字 chat_id，以及 `GewePlus:123456789` 这类带平台前缀的写法。owner 权限只认宿主对当前调用给出的标准 owner 字段：工具执行上下文的 `senderIsOwner=true`，或 `before_tool_call` 的 `requester.senderIsOwner=true` 按精确 `toolCallId` 形成的一次性 receipt。两条路径都不跨调用、跨轮缓存。插件不设白名单，不按 sender ID / agent ID / cron 身份推断 owner。后台维护由插件内部调用完成，不通过 agent 工具提权；显式查询不要求当前发送者已有账号行。
 
-状态与诊断是两个入口：普通 agent 用 `people_status` 看是否正常，也可查自己的画像；完整诊断（`people_health` / `people_validate` / `people_cycle`）只给 owner。agent 工具始终绑定当前会话 agent 的工作区，不接受 `workspace` 参数切换；要操作另一个工作区，就在该工作区有权限的 agent 会话中执行。CLI 的 `--workspace` 属于本机 operator 入口，由宿主文件系统权限约束。
+状态与诊断是两个入口：普通 agent 用 `people_status` 看是否正常，也可查自己的画像；完整诊断（`people_health` / `people_validate` / `people_cycle`）只给 owner。身份挂起计数只覆盖最近 7 天，历史累计数字已经作废；owner 可在 `people_health` 查看最近 7 天按原因聚合的挂起诊断，后台维护会自动清理超期明细。agent 工具始终绑定当前会话 agent 的工作区，不接受 `workspace` 参数切换；要操作另一个工作区，就在该工作区有权限的 agent 会话中执行。CLI 的 `--workspace` 属于本机 operator 入口，由宿主文件系统权限约束。
 
 ## 自动行为
 

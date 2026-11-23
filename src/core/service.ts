@@ -181,9 +181,19 @@ export class PeopleService {
       const writePlatform = target.kind === "direct" ? target.platform : platform;
       const multiBackend = this.isBareMultiAccount(platform) || platform.includes("/");
       const at = nowIso();
+      let deferredEvent = false;
       if (input.source === "deferred" || (multiBackend && target.kind === "deferred")) {
-        this.db.metaSet("capture_deferred_at", at);
-        this.db.metaSet("capture_deferred_count", String(Number(this.db.metaGet("capture_deferred_count") ?? 0) + 1));
+        this.db.addDeferredEvent({
+          occurredAt: at,
+          channel: this.channelOf(platform),
+          reason: input.deferredReason ?? "identity_unresolved",
+          channelContext: input.deferredFields?.channelContext === true,
+          metadataPlatform: input.deferredFields?.metadataPlatform === true,
+          routeTarget: input.deferredFields?.routeTarget === true,
+          sessionHint: input.deferredFields?.sessionHint === true,
+          agentId: input.agentId,
+        });
+        deferredEvent = true;
       } else if (input.source === "session_fallback") {
         this.db.metaSet("capture_session_fallback_count", String(Number(this.db.metaGet("capture_session_fallback_count") ?? 0) + 1));
       } else if (input.source === "standard" || input.source === "explicit") {
@@ -269,6 +279,7 @@ export class PeopleService {
         displayNameChanged,
         groupId,
         groupCreated,
+        deferredEvent,
       };
     });
   }
@@ -1309,11 +1320,12 @@ export class PeopleService {
   health(): HealthReport {
     const captureStatus = (): StatusReport["capture"] => ({
       lastAt: this.db.metaGet("capture_last_at"),
-      deferredAt: this.db.metaGet("capture_deferred_at"),
+      deferredAt: this.db.deferredEvents(1).lastAt,
       standardCount: Number(this.db.metaGet("capture_standard_count") ?? 0),
       sessionFallbackCount: Number(this.db.metaGet("capture_session_fallback_count") ?? 0),
-      deferredCount: Number(this.db.metaGet("capture_deferred_count") ?? 0),
+      deferredCount: this.db.deferredEvents(1).total,
     });
+    const deferredEvents = this.db.deferredEvents(200);
 
     const validation = this.validate();
     const issues = validation.issues.filter((issue) => issue.level !== "info");
@@ -1404,6 +1416,7 @@ export class PeopleService {
       issues,
       lastBackupAt,
       capture: captureStatus(),
+      deferredEvents,
     };
   }
 
@@ -1602,6 +1615,7 @@ export class PeopleService {
       before.issues.some((issue) => !NON_MUTATING_HEALTH_ISSUES.has(issue.code)) ||
       this.repairMayMutate();
     const backup = shouldBackup ? this.backup(input.backupKeep ?? 14) : null;
+    const deferredEventsPruned = this.db.pruneDeferredEvents(7);
 
     const repairActions = this.repair();
     const health = this.health();
@@ -1668,6 +1682,7 @@ export class PeopleService {
         backup: backup ? { dbBackup: backup.dbBackup, jsonBackup: backup.jsonBackup } : null,
         repairActions,
         actions,
+        deferredEventsPruned,
       }),
     );
     return {
@@ -1678,6 +1693,7 @@ export class PeopleService {
       health,
       actions,
       lastCycleAt: previousCycle,
+      deferredEventsPruned,
     };
   }
 
@@ -1708,10 +1724,10 @@ export class PeopleService {
       legacyImportedAt: this.db.metaGet("legacy_imported_at"),
       capture: {
         lastAt: this.db.metaGet("capture_last_at"),
-        deferredAt: this.db.metaGet("capture_deferred_at"),
+        deferredAt: this.db.deferredEvents(1).lastAt,
         standardCount: Number(this.db.metaGet("capture_standard_count") ?? 0),
         sessionFallbackCount: Number(this.db.metaGet("capture_session_fallback_count") ?? 0),
-        deferredCount: Number(this.db.metaGet("capture_deferred_count") ?? 0),
+        deferredCount: this.db.deferredEvents(1).total,
       },
       maintenance: {
         active: maintenanceActive,

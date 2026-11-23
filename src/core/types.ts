@@ -133,6 +133,13 @@ export type CaptureInput = {
   agentId?: string;
   role?: string;
   source?: "explicit" | "standard" | "session_fallback" | "deferred";
+  deferredReason?: string;
+  deferredFields?: {
+    channelContext?: boolean;
+    metadataPlatform?: boolean;
+    routeTarget?: boolean;
+    sessionHint?: boolean;
+  };
 };
 
 export type CaptureResult = {
@@ -141,12 +148,26 @@ export type CaptureResult = {
   displayNameChanged: boolean;
   groupId?: string;
   groupCreated?: boolean;
+  deferredEvent?: boolean;
 };
 
 export type ValidationIssue = {
   level: "error" | "warning" | "info";
   code: string;
   message: string;
+};
+
+export type DeferredEventSummary = {
+  reason: string;
+  count: number;
+  lastAt: string;
+};
+
+export type DeferredEventsReport = {
+  total: number;
+  lastAt: string | null;
+  windowDays: number;
+  recent: DeferredEventSummary[];
 };
 
 export type ValidationReport = {
@@ -207,6 +228,7 @@ export type HealthReport = {
   issues: ValidationIssue[];
   lastBackupAt: string | null;
   capture: StatusReport["capture"];
+  deferredEvents?: DeferredEventsReport;
 };
 
 export type SearchReport = {
@@ -231,6 +253,7 @@ export type CycleReport = {
   health: HealthReport;
   actions: CycleAction[];
   lastCycleAt: string | null;
+  deferredEventsPruned?: number;
 };
 
 export type LegacyImportReport = {

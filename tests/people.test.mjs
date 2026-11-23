@@ -214,6 +214,7 @@ test("schema v1 databases migrate to v3 without losing account hints or rows", (
   const legacy = new DatabaseSync(dbPath);
   legacy.exec(SCHEMA_SQL.replaceAll("  call_name TEXT,\n", ""));
   legacy.prepare("INSERT INTO meta(key, value) VALUES('schema_version', '1')").run();
+  legacy.prepare("INSERT INTO meta(key, value) VALUES('capture_deferred_count', '372')").run();
   legacy.prepare(
     "INSERT INTO accounts(account_id, platform, platform_key, sender_id, display_name, current_role, first_seen, last_interaction, updated_at) " +
     "VALUES('telegram:v1-user', 'telegram', 'telegram', 'v1-user', '旧用户', 'user', ?, ?, ?)",
@@ -227,6 +228,7 @@ test("schema v1 databases migrate to v3 without losing account hints or rows", (
   const paths = resolveStorePaths({ workspaceDir: workspace, config: { dataDir: "{workspace}/people" } });
   const service = new PeopleService({ paths, config: { importLegacy: false } });
   assert.equal(service.status().schemaVersion, 3);
+  assert.equal(service.status().capture.deferredCount, 0, "legacy cumulative deferred count is discarded");
   assert.equal(service.db.getAccount("telegram:v1-user")?.call_name, null);
   assert.equal(service.db.getAccount("telegram:v1-user")?.bot_hint, "human");
   assert.equal(service.db.getAccount("telegram:v1-user")?.bot_hint_source, "history");
@@ -1222,6 +1224,73 @@ test("system auto-rows are skipped and same-family duplicates auto-merge", () =>
   assert.equal(configured.db.getAccountByPlatformSender("bncr/tgBot", "bncr-history-system"), null);
   assert.equal(configured.db.getAccountByPlatformSender("bncr/tgBot", "custom-system"), null);
   configured.close();
+});
+
+test("deferred captures keep a seven-day diagnostic ledger without creating rows", () => {
+  const workspace = tempWorkspace();
+  const service = open(workspace);
+
+  const result = service.capture({
+    platform: "bncr",
+    senderId: "deferred-user",
+    source: "deferred",
+    deferredReason: "backend_missing_no_context_or_target",
+    deferredFields: { channelContext: false, metadataPlatform: false, routeTarget: false, sessionHint: false },
+  });
+  assert.equal(result.accountId, null);
+  assert.equal(result.deferredEvent, true);
+  assert.equal(service.db.getAccountByPlatformSender("bncr", "deferred-user"), null);
+
+  const report = service.db.deferredEvents(10);
+  assert.equal(report.total, 1);
+  assert.equal(report.windowDays, 7);
+  assert.equal(report.recent.length, 1);
+  assert.equal(report.recent[0].reason, "backend_missing_no_context_or_target");
+  assert.ok(report.lastAt);
+
+  const status = service.status();
+  assert.equal(status.capture.deferredCount, 1);
+  assert.equal(status.capture.deferredAt, report.lastAt);
+  assert.ok(service.health().deferredEvents, "owner health report includes the deferred ledger");
+
+  service.close();
+});
+
+test("deferred diagnostics expire after seven days and cycle prunes old rows", () => {
+  const workspace = tempWorkspace();
+  const service = open(workspace);
+  const oldAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+  const freshAt = new Date().toISOString();
+
+  service.db.addDeferredEvent({
+    occurredAt: oldAt,
+    channel: "bncr",
+    reason: "old_issue",
+    channelContext: false,
+    metadataPlatform: false,
+    routeTarget: false,
+    sessionHint: false,
+  });
+  service.db.addDeferredEvent({
+    occurredAt: freshAt,
+    channel: "bncr",
+    reason: "fresh_issue",
+    channelContext: false,
+    metadataPlatform: false,
+    routeTarget: false,
+    sessionHint: false,
+  });
+  assert.equal(service.status().capture.deferredCount, 1, "expired rows are excluded before pruning");
+  assert.equal(service.db.deferredEvents(10).total, 1, "seven-day reads exclude expired rows before pruning");
+
+  const cycle = service.cycle({ backupIntervalHours: 168 });
+  assert.equal(cycle.deferredEventsPruned, 1);
+  assert.equal(service.status().capture.deferredCount, 1, "seven-day count follows retained rows");
+  assert.equal(service.db.deferredEvents(10).recent.length, 1);
+  assert.equal(service.db.deferredEvents(10).recent[0].reason, "fresh_issue");
+  assert.equal(service.db.deferredEvents(10).lastAt, freshAt);
+
+  service.close();
 });
 
 test("bare multi-channel writes defer and route to the backend row", () => {

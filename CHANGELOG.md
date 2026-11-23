@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 挂起诊断 7 天窗口
+
+- 身份挂起从永久累计计数改为 7 天滚动窗口；历史累计数字不再展示，也不补录。
+- 新增脱敏挂起诊断明细：原因、时间、频道、宿主字段存在性和 agent id，不记录消息正文或 sender 身份。
+- 后台维护每轮清理超过 7 天的明细；`people_health` 给 owner 展示按原因聚合的近 7 天诊断，`people_status` 保持普通 agent 可见的简洁状态。
+
 ## 0.1.0 — 四层身份读取与自定义频道契约（2026-11-18）
 
 - 身份字段按四层通用顺序读取：`channelContext.chat.platform` → 扁平 metadata `platform` / `provider` / `surface` → 标准投递目标 `metadata.to` / `originatingTo` → BNCR sessionKey hex。标签与标准目标冲突时目标优先，后端与 chat 始终来自同一坐标。

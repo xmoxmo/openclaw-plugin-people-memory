@@ -114,7 +114,9 @@ openclaw people health --agent main --json |
 
 ### 5. 看采集心跳
 
-`openclaw people status` 的 `capture.lastAt`、`standardCount`、`sessionFallbackCount` 和 `deferredCount` 反映标准字段、BNCR hex 回退和无法确定身份的挂起次数。标准字段优先；`deferredCount` 持续增长说明入站元数据缺后端，需要检查频道适配。
+`openclaw people status` 的 `capture.lastAt`、`standardCount` 和 `sessionFallbackCount` 反映标准字段和 BNCR hex 回退的累计心跳。`deferredCount` 只统计最近 7 天的身份挂起次数；`deferredAt` 是最近一次挂起时间。累计挂起数已经废弃，历史值不补录，超过 7 天的明细会自动删除。
+
+需要排障时，owner 用 `people_health` 查看挂起诊断。它按原因聚合最近 7 天的记录（`channelContext`、扁平 metadata platform、投递 target、session hint 是否存在），不记录消息正文和 sender 身份。后台 service 每轮维护自动清理超过 7 天的明细，普通 agent 只看 `people_status` 的运行状态。
 
 ## 五、失败和边界
 

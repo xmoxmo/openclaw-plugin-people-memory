@@ -170,6 +170,8 @@ export function registerHooks(
               senderId,
               agentId: ctx.agentId,
               source: "deferred",
+              deferredReason: identity.deferredReason,
+              deferredFields: identity.deferredFields,
             });
           }
           return undefined;
