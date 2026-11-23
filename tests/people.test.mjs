@@ -2433,15 +2433,32 @@ test("binding is idempotent and explicit rebinding requires an unbind first", ()
   service.close();
 });
 
-test("a bound account can self-confirm a person name without losing it", () => {
+test("a bound account self-names only its own account unless owner edits the person", () => {
   const workspace = tempWorkspace();
   const service = open(workspace);
   service.capture({ platform: "telegram", senderId: "self-name", senderName: "平台昵称" });
   const person = service.bind({ accountId: "telegram:self-name", name: "旧名字" });
 
-  const result = service.setName({ accountId: "telegram:self-name", confirmedName: "新确认名" });
-  assert.equal(result.target, "person");
-  assert.equal(service.db.getPerson(person.personId).name, "新确认名");
+  const result = service.setName({
+    accountId: "telegram:self-name",
+    confirmedName: "新确认名",
+    owner: false,
+  });
+  assert.equal(result.target, "account");
+  assert.equal(service.db.getAccount("telegram:self-name").confirmed_name, "新确认名");
+  assert.equal(service.db.getPerson(person.personId).name, "旧名字");
+  assert.throws(
+    () => service.setName({ accountId: "telegram:self-name", personName: "管理员改名", owner: false }),
+    /只有 owner 可以修改人物正式名字/,
+  );
+
+  const ownerResult = service.setName({
+    accountId: "telegram:self-name",
+    confirmedName: "管理员确认名",
+    owner: true,
+  });
+  assert.equal(ownerResult.target, "person");
+  assert.equal(service.db.getPerson(person.personId).name, "管理员确认名");
   assert.equal(service.db.getTraits("person", person.personId).length, 0);
   service.close();
 });

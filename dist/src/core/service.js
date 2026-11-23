@@ -654,6 +654,15 @@ export class PeopleService {
                 const person = this.db.getPerson(account.bound_person_id);
                 if (!person)
                     throw new Error(`绑定的人物不存在: ${account.bound_person_id}`);
+                if (!input.owner) {
+                    if (personName)
+                        throw new Error("只有 owner 可以修改人物正式名字。");
+                    if (callName)
+                        this.db.setCallName(account.account_id, callName);
+                    if (confirmedName)
+                        this.db.setConfirmedName(account.account_id, confirmedName);
+                    return { target: "account", callName: callName ?? account.call_name };
+                }
                 this.db.updatePerson(person.person_id, { callName, name: personName ?? confirmedName });
                 return { target: "person", callName: callName ?? person.call_name };
             }

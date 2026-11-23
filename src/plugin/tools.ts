@@ -454,7 +454,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
 
   register(
     "people_remember",
-    "记录一条关于某人的事实或印象；可选写入某个特征维度。默认记录当前发送者。",
+    "记录事实或印象。默认写自己；owner 可用 account/person 指定他人；非 owner 转述他人时只作为待核证据文本。",
     {
       type: "object",
       additionalProperties: false,
@@ -463,7 +463,8 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
         content: { type: "string", description: "要记录的事实，尽量保留原始表述。" },
         dimension: { type: "string", description: "可选特征维度 key，例如 basic_origin、preference。" },
         mode: { type: "string", enum: ["append", "replace"], description: "维度值写入方式，默认 append。" },
-        account: { type: "string", description: "目标账号；省略表示当前发送者。仅 owner 可指定他人。" },
+        account: { type: "string", description: "目标账号；省略表示当前发送者。仅 owner 可指定他人。非 owner 的他人转述请用 about。" },
+        about: { type: "string", description: "非 owner 转述他人时使用：证据对象描述；不会作为正式字段，也不修改他人画像。" },
         person: { type: "string", description: "目标人物 ID（p_ 开头）。仅 owner 可用，用于整理人物级画像。" },
         source: { type: "string", description: "来源标记，例如 chat、manual、scan。" },
       },
@@ -491,6 +492,19 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
         );
       }
       const accountRef = stringArg(args, "account");
+      const about = stringArg(args, "about");
+      if (about && !accountRef && !canManage(ctx)) {
+        const self = currentAccount(ctx, runtime, service);
+        if (!self) throw new Error("当前消息没有可识别的发送者。");
+        const marker = safeContextValue(about, 120);
+        const evidence = service.remember({
+          accountId: self.account_id,
+          content: `他人转述证据（${marker}）：${content.slice(0, 500)}`,
+          agentId: ctx.agentId,
+          source: "chat_observation",
+        });
+        return textResult(rememberResult(self.display_name ?? self.account_id, evidence));
+      }
       const target = resolveMutationAccount(service, ctx, runtime, accountRef, {
         noSelf: "当前消息没有可识别的发送者。",
         foreign: "只能记录自己的信息。",
@@ -536,6 +550,7 @@ export function registerTools(api: OpenClawPluginApi, runtime: PeopleRuntime): v
         callName: stringArg(args, "call_name"),
         confirmedName: stringArg(args, "confirmed_name"),
         personName: stringArg(args, "person_name"),
+        owner: ownerAuthorized(ctx),
       });
       return textResult(
         `已更新${result.target === "person" ? "人物" : "账号"}称呼${result.callName ? `：${safeContextValue(result.callName)}` : "。"}`,

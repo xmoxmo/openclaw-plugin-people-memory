@@ -53,6 +53,8 @@ agent 在各平台以平台账号出现（例如 orion 同时有 bncr/GewePlus �
 
 显示优先级：`call_name`（本人钦定，自我介绍走 `people_name { call_name }`）> `confirmed_name`（自述名字）> 最近活跃行的平台昵称。人物级同名优先级。call_name 不被昵称同步覆盖；owner 解绑后系统不自动补绑已有人物，除非又出现新接入行。
 
+命名写入分三层：本人自我介绍只写当前账号的 `call_name` / `confirmed_name`，即使账号已绑定人物也不穿透到人物正式字段；第三方转述由 agent 判断是否值得记录，并通过 `people_remember { about, content }` 存为来源为 `chat_observation` 的待核证据，不自动归集、不把转述提升为正式名；owner 可使用 `people_name { account, person_name }` 直接修改账号或人物正式字段。
+
 ## 隔离与共享（按工作区）
 
 数据边界是 agent 可见工作区，不是 agent id。
